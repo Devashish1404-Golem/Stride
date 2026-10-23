@@ -102,12 +102,27 @@ export function parseExercise(p) {
   const km = distanceKm(p);
   if (!start || !km || !isFinite(sec)) return null;
   const hr = num(findVal(p, /average.*heart|heart.*average|avg.*(hr|heart)/i, isNum));
+  const maxHr = num(findVal(p, /max.*heart|heart.*max|peak.*heart/i, isNum));
+  const cal = num(findVal(p, /calorie|energy/i, isNum));
   return {
     id: uid(), extId: p.name || `${start}-${km}`, source: 'fitbit', name: name || 'Fitbit run',
     date: ymd(new Date(start)), startTime: start, distKm: Math.round(km * 100) / 100,
     durSec: Math.round(sec), avgHr: isNaN(hr) ? null : Math.round(hr),
+    maxHr: isNaN(maxHr) ? null : Math.round(maxHr), calories: isNaN(cal) ? null : Math.round(cal),
   };
 }
+
+// Daily health metrics beyond resting HR and sleep. Each is fetched best-effort: if Google
+// doesn't expose a type for your account/device, it's skipped without breaking the sync.
+export const METRICS = {
+  vo2max: { type: 'daily-vo2-max', label: 'VO₂ max', unit: 'ml/kg/min', re: /vo2|estimate|value/i, dp: 1 },
+  hrv: { type: 'daily-heart-rate-variability', label: 'HRV', unit: 'ms', re: /rmssd|millis|hrv|value/i, dp: 0 },
+  spo2: { type: 'daily-oxygen-saturation', label: 'SpO₂', unit: '%', re: /percent|average|saturation|value/i, dp: 1 },
+  resp: { type: 'daily-respiratory-rate', label: 'Breathing rate', unit: 'br/min', re: /breath|rate|value/i, dp: 1 },
+  skinTemp: { type: 'daily-skin-temperature', label: 'Skin temp vs baseline', unit: '°C', re: /celsius|deviation|relative|value/i, dp: 1 },
+  steps: { type: 'daily-steps', label: 'Steps', unit: '', re: /count|steps|value/i, dp: 0 },
+  weight: { type: 'weight', label: 'Weight', unit: 'kg', re: /kilogram|grams|weight|value/i, dp: 1, grams: true },
+};
 
 function parseDaily(p, valueRe) {
   const v = num(findVal(p, valueRe, isNum));
@@ -134,7 +149,7 @@ export async function sync(state, onRun) {
   const fb = state.fitbit;
   if (!isConnected(fb)) throw new Error('Not connected.');
   const since = addDays(today(), -60);
-  const report = { runs: 0, rhr: 0, sleep: 0, errors: [] };
+  const report = { runs: 0, rhr: 0, sleep: 0, metrics: {}, errors: [] };
 
   try {
     const known = new Set(state.runs.map((r) => r.extId).filter(Boolean));
@@ -161,12 +176,42 @@ export async function sync(state, onRun) {
     }
   } catch (e) { report.errors.push(`Sleep: ${e.message}`); }
 
+  fb.metrics ||= {};
+  for (const [key, m] of Object.entries(METRICS)) {
+    try {
+      for (const p of await listAll(fb, m.type, 2)) {
+        const d = parseDaily(p, m.re);
+        if (!d || d.date < since) continue;
+        let v = d.v;
+        if (m.grams && v > 1000) v /= 1000; // grams -> kg
+        (fb.metrics[key] ||= {})[d.date] = +v.toFixed(m.dp);
+        report.metrics[key] = (report.metrics[key] || 0) + 1;
+      }
+    } catch (e) { fb.metricErrors = { ...(fb.metricErrors || {}), [key]: e.message }; }
+  }
+
   state.runs.sort((a, b) => a.date.localeCompare(b.date));
   fb.lastSync = new Date().toISOString();
   return report;
 }
 
 // ---------- file imports (work regardless of API access) ----------
+
+// Fitbit / Google Takeout export daily files. Returns how many values were stored, or -1 if not recognised.
+const fbDate = (s) => { const m = String(s).match(/^(\d\d)\/(\d\d)\/(\d\d)/); return m ? `20${m[3]}-${m[1]}-${m[2]}` : String(s).slice(0, 10); };
+export function importFitbitDaily(filename, json, fb) {
+  const f = filename.toLowerCase();
+  const arr = Array.isArray(json) ? json : [];
+  const put = (key, date, v) => { if (date && isFinite(v)) { (fb.metrics[key] ||= {})[date] = v; n++; } };
+  let n = 0;
+  fb.metrics ||= {};
+  if (f.includes('vo2_max')) arr.forEach((x) => put('vo2max', fbDate(x.dateTime), +(x.value?.filteredDemographicVO2Max ?? x.value?.demographicVO2Max)?.toFixed(1)));
+  else if (f.includes('resting_heart_rate')) arr.forEach((x) => { const v = x.value?.value; if (v) { fb.rhr[fbDate(x.dateTime)] = Math.round(v); n++; } });
+  else if (f.startsWith('sleep')) arr.forEach((x) => { if (x.mainSleep !== false && x.minutesAsleep) { const d = x.dateOfSleep || fbDate(x.endTime); fb.sleep[d] = Math.max(fb.sleep[d] || 0, x.minutesAsleep); n++; } });
+  else if (f.includes('weight')) arr.forEach((x) => put('weight', fbDate(x.date || x.dateTime), +(+x.weight).toFixed(1)));
+  else return -1;
+  return n;
+}
 
 // Fitbit / Google Takeout export: exercise-*.json files (array of activity logs).
 export function parseFitbitExport(json) {

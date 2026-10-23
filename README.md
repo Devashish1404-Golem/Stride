@@ -70,7 +70,15 @@ comes through the **Google Health API**, which needs a one-time Google Cloud set
    - Authorised redirect URI: exactly what Stride shows under Settings, e.g. `https://<your-username>.github.io/stride/`
 4. Copy the Client ID into **Stride → Settings → Fitbit via Google Health**, then tap **Connect**.
 
-Stride syncs runs (distance, time, avg HR), resting heart rate and sleep for the last 60 days.
+Stride syncs the last 60 days of:
+- **Runs:** distance, time, avg/max heart rate, calories
+- **VO₂ max** (Fitbit cardio fitness score)
+- **HRV**, **resting heart rate**, **sleep**
+- **SpO₂**, **breathing rate**, **skin temperature**, **steps**, **weight**
+
+HRV, resting HR, sleep, breathing rate and skin temperature feed the daily readiness score, which can suggest
+swapping a hard session for an easy one. VO₂ max trends show up as coach insights. Any data type Google doesn't
+provide for your device is skipped.
 It syncs again automatically when you open the app (if the last sync was over 3 hours ago).
 Google's browser tokens last 1 hour, so you'll occasionally need to tap Connect again.
 

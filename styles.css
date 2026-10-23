@@ -268,3 +268,13 @@ label.check input { width: 22px; height: 22px; margin: 0; -webkit-appearance: au
   .preds { grid-template-columns: repeat(2, 1fr); }
   .tgrid b { font-size: 30px; }
 }
+
+/* health metrics */
+.hm { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.hm b { font-size: 22px; font-variant-numeric: tabular-nums; }
+.hm b small { font-size: 13px; color: var(--muted); font-weight: 500; }
+.delta { display: block; font-size: 12px; color: var(--muted); }
+.delta.up { color: var(--good); }
+.delta.down { color: var(--warn); }
+.spark { width: 120px; height: 38px; flex: none; }
+.spark path { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }

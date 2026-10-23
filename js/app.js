@@ -3,7 +3,7 @@ import { state, save, replaceState, resetState } from './store.js';
 import { vdotFrom, vdotFromEasyPace, predictTime, DISTANCES, ZONES } from './vdot.js';
 import { generatePlan, mergePlans, allWorkouts, weekOf, swapToEasy } from './plan.js';
 import { EXERCISES, sessionByKey, allSessions, suggestLoad } from './gym.js';
-import { insights, readiness, matchRun, currentPaces, runKmBetween, workoutById, fitnessEstimate } from './coach.js';
+import { insights, readiness, matchRun, currentPaces, runKmBetween, workoutById, fitnessEstimate, latestVsBaseline } from './coach.js';
 import * as health from './health.js';
 import { RunTracker } from './tracker.js';
 
@@ -130,6 +130,7 @@ function renderOnboarding() {
           <label>Weekly km now<input type="number" name="weeklyKm" min="0" max="250" value="${pr.weeklyKm ?? 25}"></label>
           <label>Longest recent run (km)<input type="number" name="longestKm" min="0" max="60" value="${pr.longestKm ?? 12}"></label>
         </div>
+        <label>Max heart rate <span class="muted">(optional, bpm; otherwise taken from your Fitbit runs)</span><input type="number" name="maxHr" min="120" max="230" inputmode="numeric" value="${pr.maxHr ?? ''}"></label>
         <label>Experience<select name="experience">${['beginner', 'intermediate', 'advanced'].map((x) => `<option ${(pr.experience || 'intermediate') === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
       </section>
       <section class="card">
@@ -164,6 +165,7 @@ function onboardSubmit(e) {
     ...(state.profile || {}),
     name: f.get('name').trim(), goal, raceDate: f.get('raceDate'), goalTime: goalTime > 0 ? goalTime : null,
     recentDist, recentTime, easyPace, vdot,
+    maxHr: Number(f.get('maxHr')) || null,
     weeklyKm: Number(f.get('weeklyKm')) || 0, longestKm: Number(f.get('longestKm')) || 0,
     experience: f.get('experience'), runDays, longRunDay, gymDays, volumeScale: state.profile?.volumeScale ?? 1,
   };
@@ -282,15 +284,45 @@ function weeklyChart() {
   </svg><div class="legend"><span><i class="lg-actual"></i>actual</span><span><i class="lg-planned"></i>planned</span></div>`;
 }
 
-function rhrChart() {
+function sparkline(series, color) {
   const t = today();
-  const pts = Array.from({ length: 30 }, (_, i) => addDays(t, i - 29)).map((d) => state.fitbit.rhr[d]).map((v, i) => [i, v]).filter(([, v]) => v);
-  if (pts.length < 3) return '';
-  const vs = pts.map(([, v]) => v), lo = Math.min(...vs) - 2, hi = Math.max(...vs) + 2;
-  const W = 340, H = 70;
-  const path = pts.map(([i, v], k) => `${k ? 'L' : 'M'}${(i / 29) * W},${H - ((v - lo) / (hi - lo)) * H}`).join(' ');
-  return `<section class="card"><div class="row between"><h3>Resting heart rate</h3><span class="muted">${vs[vs.length - 1]} bpm</span></div>
-    <svg viewBox="0 -4 ${W} ${H + 8}" class="chart"><path d="${path}" class="line"/></svg><p class="muted small">30 days. A rising trend often means fatigue, illness or stress.</p></section>`;
+  const pts = Array.from({ length: 30 }, (_, i) => [i, series?.[addDays(t, i - 29)]]).filter(([, v]) => v != null);
+  if (pts.length < 2) return '';
+  const vs = pts.map(([, v]) => v), pad = (Math.max(...vs) - Math.min(...vs)) * 0.15 || 1;
+  const lo = Math.min(...vs) - pad, hi = Math.max(...vs) + pad, W = 120, H = 34;
+  const d = pts.map(([i, v], k) => `${k ? 'L' : 'M'}${((i / 29) * W).toFixed(1)},${(H - ((v - lo) / (hi - lo)) * H).toFixed(1)}`).join(' ');
+  return `<svg viewBox="0 -2 ${W} ${H + 4}" class="spark"><path d="${d}" style="stroke:${color}"/></svg>`;
+}
+
+// All the Fitbit health data in one card: latest value, change vs 2-week baseline, 30-day trend.
+function healthCard() {
+  const fb = state.fitbit;
+  const m = fb.metrics || {};
+  const rows = [
+    { key: 'vo2max', label: 'VO₂ max', unit: '', series: m.vo2max, color: 'var(--accent)', good: 'up' },
+    { key: 'rhr', label: 'Resting HR', unit: 'bpm', series: fb.rhr, color: 'var(--alert)', good: 'down' },
+    { key: 'hrv', label: 'HRV', unit: 'ms', series: m.hrv, color: 'var(--good)', good: 'up' },
+    { key: 'sleep', label: 'Sleep', unit: 'h', series: Object.fromEntries(Object.entries(fb.sleep).map(([d, v]) => [d, round1(v / 60)])), color: 'var(--gym)', good: 'up' },
+    { key: 'spo2', label: 'SpO₂', unit: '%', series: m.spo2, color: 'var(--z-easy)' },
+    { key: 'resp', label: 'Breathing rate', unit: '/min', series: m.resp, color: 'var(--z-t)', good: 'down' },
+    { key: 'skinTemp', label: 'Skin temp', unit: '°C', series: m.skinTemp, color: 'var(--z-i)' },
+    { key: 'steps', label: 'Steps', unit: '', series: m.steps, color: 'var(--z-long)', good: 'up' },
+    { key: 'weight', label: 'Weight', unit: 'kg', series: m.weight, color: 'var(--muted)' },
+  ].filter((r) => r.series && Object.keys(r.series).length);
+  if (!rows.length) return '';
+  return `<section class="card"><h3>Health & recovery</h3>
+    ${rows.map((r) => {
+      const dates = Object.keys(r.series).sort();
+      const last = r.series[dates[dates.length - 1]];
+      const { baseline } = latestVsBaseline(r.series);
+      const diff = baseline != null ? last - baseline : null;
+      const cls = diff == null || Math.abs(diff) < Math.abs(baseline) * 0.03 ? '' : (diff > 0) === (r.good === 'up') ? 'up' : r.good ? 'down' : '';
+      return `<div class="hm"><div class="grow"><div class="muted small">${r.label}</div>
+        <b>${r.key === 'steps' ? Math.round(last).toLocaleString() : last}<small> ${r.unit}</small></b>
+        ${diff != null ? `<span class="delta ${cls}">${diff > 0 ? '▲' : '▼'} ${Math.abs(round1(diff))} vs 2-wk avg</span>` : ''}</div>
+        ${sparkline(r.series, r.color)}</div>`;
+    }).join('')}
+    <p class="muted small">Last 30 days from Fitbit. Low HRV, a rising resting HR or higher skin temperature lowers today's readiness score.</p></section>`;
 }
 
 function viewProgress() {
@@ -310,14 +342,14 @@ function viewProgress() {
       ${['E', 'M', 'T', 'I', 'R'].map((z) => `<div class="step"><span class="zdot" style="background:${ZONES[z].color}"></span><div class="grow"><b>${ZONES[z].name}</b><div class="muted small">${ZONES[z].desc}</div></div><div class="pace">${paceRange(z, p)}<small>/km</small></div></div>`).join('')}
     </section>
     <section class="card"><h3>Weekly distance</h3>${weeklyChart()}</section>
-    ${rhrChart()}
+    ${healthCard()}
     <h2 class="sec">Coach insights</h2>
     ${ins.length ? ins.map(insightCard).join('') : '<p class="muted">Log a few runs and the coach starts adapting your plan.</p>'}
     <div class="row between"><h2 class="sec">Runs</h2><button class="btn sm" data-act="logRun" data-id="">+ Log run</button></div>
     ${runs.length ? runs.map((r) => {
       const w = r.workoutId && workoutById(state, r.workoutId);
       return `<div class="hist"><span class="zdot" style="background:${TYPE_COLOR[w?.type] || 'var(--muted)'}"></span><div class="grow"><b>${esc(w?.title || r.name || 'Run')}</b>
-        <div class="muted small">${fmtDate(r.date)} · ${fmtKm(r.distKm)} km · ${fmtDur(r.durSec)} · ${fmtPace(r.durSec / r.distKm)}/km${r.avgHr ? ` · ${r.avgHr} bpm` : ''} · ${r.source}</div></div>
+        <div class="muted small">${fmtDate(r.date)} · ${fmtKm(r.distKm)} km · ${fmtDur(r.durSec)} · ${fmtPace(r.durSec / r.distKm)}/km${r.avgHr ? ` · ${r.avgHr}${r.maxHr ? `/${r.maxHr}` : ''} bpm` : ''} · ${r.source}</div></div>
         <button class="x" data-act="deleteRun" data-id="${r.id}" aria-label="Delete run">×</button></div>`;
     }).join('') : '<p class="muted">No runs yet.</p>'}`;
 }
@@ -336,20 +368,21 @@ function viewSettings() {
     </section>
     <section class="card">
       <h3>Fitbit via Google Health</h3>
-      <p class="muted small">Pulls runs (distance, time, heart rate), resting heart rate and sleep from your Fitbit through Google’s Health API. The old Fitbit Web API shuts down on 30 Oct 2026, so this uses Google’s replacement. See README for the one-time Google Cloud setup.</p>
+      <p class="muted small">Pulls runs (distance, time, avg/max heart rate, calories), VO₂ max, HRV, resting heart rate, sleep, SpO₂, breathing rate, skin temperature, steps and weight from your Fitbit through Google’s Health API. The old Fitbit Web API shuts down on 30 Oct 2026, so this uses Google’s replacement. See README for the one-time Google Cloud setup.</p>
       <label>Google OAuth Client ID<input id="clientId" value="${esc(fb.clientId)}" placeholder="1234-abc.apps.googleusercontent.com" autocapitalize="off" spellcheck="false"></label>
       <div class="muted small">Authorised redirect URI to register: <code>${esc(health.redirectUri())}</code></div>
       <div class="row gap">
         ${connected ? `<button class="btn primary" data-act="fbSync">${icon('sync')} Sync now</button><button class="btn ghost" data-act="fbDisconnect">Disconnect</button>`
           : `<button class="btn primary" data-act="fbConnect">Connect</button>`}
       </div>
+      ${fb.lastSync ? `<div class="muted small">Data received: ${['Runs', Object.keys(fb.rhr).length && 'Resting HR', Object.keys(fb.sleep).length && 'Sleep', ...Object.entries(fb.metrics || {}).filter(([, v]) => Object.keys(v).length).map(([k]) => health.METRICS[k]?.label)].filter(Boolean).join(' · ')}</div>` : ''}
       <div class="muted small">${fb.lastSync ? `Last sync ${new Date(fb.lastSync).toLocaleString()}` : 'Never synced'}${fb.tokens && !connected ? ' · session expired, reconnect' : ''}</div>
       ${fb.error ? `<div class="err">${esc(fb.error)}</div>` : ''}
       ${fb.lastRaw ? `<details><summary class="small">Show last raw response</summary><pre>${esc(JSON.stringify(fb.lastRaw, null, 1).slice(0, 3000))}</pre></details>` : ''}
     </section>
     <section class="card">
       <h3>Import runs</h3>
-      <p class="muted small">GPX or TCX files from any watch or app, or <code>exercise-*.json</code> files from your Fitbit / Google Takeout data export. Runs on a planned day are matched to the plan automatically.</p>
+      <p class="muted small">GPX or TCX files from any watch or app, or files from your Fitbit / Google Takeout export: <code>exercise-*.json</code>, <code>demographic_vo2_max-*.json</code>, <code>resting_heart_rate-*.json</code>, <code>sleep-*.json</code>, <code>weight-*.json</code>. Runs on a planned day are matched to the plan automatically.</p>
       <label class="btn block file">Choose files<input type="file" id="importFiles" multiple accept=".gpx,.tcx,.json,application/json,application/gpx+xml"></label>
     </section>
     <section class="card">
@@ -552,10 +585,14 @@ function finishRun() {
 
 // ---------------- actions ----------------
 async function importFiles(files) {
-  let added = 0, errors = 0;
+  let added = 0, errors = 0, metrics = 0;
   for (const file of files) {
     try {
       const text = await file.text();
+      if (file.name.toLowerCase().endsWith('.json')) {
+        const n = health.importFitbitDaily(file.name, JSON.parse(text), state.fitbit);
+        if (n >= 0) { metrics += n; continue; }
+      }
       const runs = file.name.toLowerCase().endsWith('.json') ? health.parseFitbitExport(JSON.parse(text)) : [health.parseTrackFile(text, file.name)];
       for (const r of runs) {
         if (r.extId && state.runs.some((x) => x.extId === r.extId)) continue;
@@ -566,7 +603,7 @@ async function importFiles(files) {
   }
   state.runs.sort((a, b) => a.date.localeCompare(b.date));
   save(); render();
-  toast(`Imported ${added} run${added === 1 ? '' : 's'}${errors ? `, ${errors} file(s) failed` : ''}`);
+  toast(`Imported ${added} run${added === 1 ? '' : 's'}${metrics ? ` + ${metrics} health values` : ''}${errors ? `, ${errors} file(s) failed` : ''}`);
 }
 
 async function fbSync(quiet = false) {
@@ -575,7 +612,8 @@ async function fbSync(quiet = false) {
     const rep = await health.sync(state, (r) => matchRun(state, r));
     state.fitbit.error = rep.errors.length ? rep.errors.join(' · ') : null;
     save(); render();
-    if (!quiet) toast(`Synced ${rep.runs} new run(s), ${rep.rhr} HR days, ${rep.sleep} nights`);
+    const extra = Object.keys(rep.metrics).map((k) => health.METRICS[k].label).join(', ');
+    if (!quiet) toast(`Synced ${rep.runs} new run(s), ${rep.rhr} HR days, ${rep.sleep} nights${extra ? `, plus ${extra}` : ''}`);
   } catch (e) {
     state.fitbit.error = e.message; save(); render();
     if (!quiet) toast(e.message);

@@ -20,31 +20,49 @@ export function matchRun(s, run) {
   }
 }
 
-export function readiness(s) {
+// Latest value (today or yesterday) and its 14-day baseline for a date-keyed series.
+export function latestVsBaseline(series = {}) {
   const t = today();
-  const rhrToday = s.fitbit.rhr[t] ?? s.fitbit.rhr[addDays(t, -1)];
+  const latest = series[t] ?? series[addDays(t, -1)];
   const base = [];
-  for (let i = 2; i <= 15; i++) { const v = s.fitbit.rhr[addDays(t, -i)]; if (v) base.push(v); }
-  const sleepMin = s.fitbit.sleep[t];
-  if (!rhrToday && !sleepMin) return null;
-  const baseline = base.length >= 4 ? sum(base) / base.length : null;
+  for (let i = 2; i <= 15; i++) { const v = series[addDays(t, -i)]; if (v != null) base.push(v); }
+  return { latest, baseline: base.length >= 4 ? sum(base) / base.length : null };
+}
+
+export function readiness(s) {
+  const m = s.fitbit.metrics || {};
+  const rhr = latestVsBaseline(s.fitbit.rhr);
+  const hrv = latestVsBaseline(m.hrv);
+  const resp = latestVsBaseline(m.resp);
+  const sleepMin = s.fitbit.sleep[today()];
+  const spo2 = latestVsBaseline(m.spo2).latest;
+  const skin = latestVsBaseline(m.skinTemp).latest;
+  if (!rhr.latest && !sleepMin && !hrv.latest) return null;
   let score = 75;
   const notes = [];
-  if (rhrToday && baseline) {
-    const d = rhrToday - baseline;
-    score -= d * 5;
-    notes.push(d >= 3 ? `Resting HR is ${Math.round(d)} bpm above your baseline` : d <= -2 ? 'Resting HR is below baseline, a good sign' : 'Resting HR is at baseline');
+  if (hrv.latest && hrv.baseline) {
+    const pct = (hrv.latest / hrv.baseline - 1) * 100;
+    score += clampN(pct * 0.8, -25, 12);
+    notes.push(pct <= -10 ? `HRV ${Math.round(hrv.latest)} ms is ${Math.round(-pct)}% below baseline` : pct >= 8 ? `HRV ${Math.round(hrv.latest)} ms is above baseline` : `HRV ${Math.round(hrv.latest)} ms is normal`);
+  }
+  if (rhr.latest && rhr.baseline) {
+    const d = rhr.latest - rhr.baseline;
+    score -= d * 4;
+    notes.push(d >= 3 ? `Resting HR +${Math.round(d)} bpm` : d <= -2 ? 'Resting HR below baseline' : 'Resting HR normal');
   }
   if (sleepMin) {
     score += (sleepMin - 450) / 6;
     notes.push(`${Math.floor(sleepMin / 60)}h ${sleepMin % 60}m sleep`);
   }
-  // recent load
-  const acute = runKmBetween(s.runs, addDays(t, -3), addDays(t, -1));
+  if (resp.latest && resp.baseline && resp.latest - resp.baseline >= 1.5) { score -= 8; notes.push('Breathing rate elevated'); }
+  if (skin != null && skin >= 0.8) { score -= 10; notes.push(`Skin temp +${skin}°C, possibly getting ill`); }
+  if (spo2 && spo2 < 93) { score -= 8; notes.push(`SpO₂ low (${spo2}%)`); }
+  const acute = runKmBetween(s.runs, addDays(today(), -3), addDays(today(), -1));
   score -= Math.max(0, acute - 25) * 0.6;
   score = Math.round(Math.max(5, Math.min(100, score)));
-  return { score, rhr: rhrToday, baseline: baseline && Math.round(baseline), sleepMin, notes, label: score >= 70 ? 'Ready to train' : score >= 50 ? 'Train with care' : 'Prioritise recovery' };
+  return { score, rhr: rhr.latest, sleepMin, hrv: hrv.latest, notes, label: score >= 70 ? 'Ready to train' : score >= 50 ? 'Train with care' : 'Prioritise recovery' };
 }
+const clampN = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 // Best recent performance → implied VDOT. Only fast efforts count, because easy runs say little about fitness.
 export function fitnessEstimate(s) {
@@ -116,6 +134,29 @@ export function insights(s) {
     if (maxV < s.profile.vdot - 2.5) out.push({ id: `vdot-down-${mondayOf(t)}`, level: 'warn', title: 'Paces might be set too fast',
       body: `Your last ${recentQuality.length} quality sessions came in slower than prescribed. Lowering your VDOT to ${round1(maxV)} makes the sessions hit the right training effect instead of overreaching.`,
       action: { label: `Set VDOT to ${round1(maxV)}`, do: 'setVdot', arg: round1(maxV) } });
+  }
+
+  // 4b. Fitbit VO2 max (cardio fitness score) trend
+  const vo2 = s.fitbit.metrics?.vo2max || {};
+  const vo2Dates = Object.keys(vo2).sort();
+  if (vo2Dates.length) {
+    const last = vo2[vo2Dates[vo2Dates.length - 1]];
+    const old = vo2Dates.filter((d) => d <= addDays(t, -28)).pop();
+    const change = old ? round1(last - vo2[old]) : null;
+    out.push({ id: `vo2-${vo2Dates[vo2Dates.length - 1]}`, level: change != null && change >= 1 ? 'good' : change != null && change <= -1.5 ? 'warn' : 'info',
+      title: `Fitbit VO₂ max: ${last}${change != null ? ` (${change > 0 ? '+' : ''}${change} in 4 wks)` : ''}`,
+      body: change != null && change <= -1.5
+        ? 'Your cardio fitness score is trending down. Common causes are missed runs, illness, poor sleep or accumulated fatigue. Check your recovery before pushing harder.'
+        : `Fitbit estimates VO₂ max from your heart rate at a given pace. Your plan's VDOT (${s.profile.vdot}) comes from actual performance and usually sits a few points below it.${last - s.profile.vdot >= 8 ? ' The gap is large, so a 5K time trial would probably justify higher training paces.' : ''}` });
+  }
+
+  // 4c. Heart-rate drift on easy runs
+  const maxHr = s.profile.maxHr || Math.max(0, ...s.runs.map((r) => r.maxHr || 0));
+  if (maxHr >= 150) {
+    const easyHr = s.runs.filter((r) => r.date >= addDays(t, -21) && r.avgHr && r.workoutId && ['easy', 'long'].includes(workoutById(s, r.workoutId)?.type));
+    const high = easyHr.filter((r) => r.avgHr > maxHr * 0.8);
+    if (easyHr.length >= 3 && high.length / easyHr.length >= 0.5) out.push({ id: `easyhr-${mondayOf(t)}`, level: 'warn', title: 'Easy-run heart rate is too high',
+      body: `${high.length} of ${easyHr.length} recent easy runs averaged above ${Math.round(maxHr * 0.8)} bpm (80% of your ${maxHr} max). Keep easy runs under ~${Math.round(maxHr * 0.78)} bpm, even if that means slowing down or walking hills.` });
   }
 
   // 5. Easy runs too fast

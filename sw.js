@@ -1,5 +1,5 @@
 // Offline support: network-first for app files (so updates arrive), cache as fallback.
-const CACHE = 'stride-v1';
+const CACHE = 'stride-v2';
 const ASSETS = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'js/app.js', 'js/util.js', 'js/store.js', 'js/vdot.js',
   'js/plan.js', 'js/gym.js', 'js/coach.js', 'js/health.js', 'js/tracker.js', 'icons/icon-180.png', 'icons/icon-192.png'];
 
