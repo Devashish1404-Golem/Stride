@@ -1,5 +1,5 @@
 import { $, $$, esc, today, addDays, fmtDate, fmtPace, fmtDur, parseDur, fmtKm, daysBetween, mondayOf, dow, DOW, DOW_LONG, round1, sum, uid, clamp } from './util.js';
-import { state, save, replaceState, resetState, tombstone, onChange } from './store.js';
+import { state, save, replaceState, resetState, tombstone, onChange, DEFAULT_TILES } from './store.js';
 import * as google from './google.js';
 import { syncNow } from './sync.js';
 import { vdotFrom, vdotFromEasyPace, predictTime, DISTANCES, ZONES } from './vdot.js';
@@ -7,7 +7,12 @@ import { generatePlan, mergePlans, allWorkouts, weekOf, swapToEasy } from './pla
 import { EXERCISES, sessionByKey, allSessions, suggestLoad } from './gym.js';
 import { insights, readiness, matchRun, currentPaces, runKmBetween, workoutById, fitnessEstimate, latestVsBaseline } from './coach.js';
 import * as health from './health.js';
-import { RunTracker } from './tracker.js';
+import { RunTracker, DEFAULT_VOICE, speak } from './tracker.js';
+import { fmtD, fmtP, paceUnit, distUnit, toUnit, uText, isMi, KM_PER_MI } from './units.js';
+import { dayStrain, plannedStrain, targetStrain, sleepPerf, recoveryColor, runLoad } from './strain.js';
+import { routeSvg } from './route.js';
+import * as strava from './strava.js';
+import * as spotify from './spotify.js';
 
 const app = $('#app');
 const sheetEl = $('#sheet');
@@ -36,8 +41,8 @@ function toast(msg, ms = 2600) {
 function estSec(w, p) {
   return sum(w.steps || [], (s) => s.time || (s.dist / 1000) * ((p[s.zone].lo + p[s.zone].hi) / 2));
 }
-const paceRange = (z, p) => `${fmtPace(p[z].lo)}–${fmtPace(p[z].hi)}`;
-const stepAmount = (s) => (s.dist ? (s.dist >= 1000 ? `${+(s.dist / 1000).toFixed(2)} km` : `${s.dist} m`) : s.time >= 60 ? `${+(s.time / 60).toFixed(1)} min` : `${s.time} s`);
+const paceRange = (z, p) => `${fmtP(p[z].lo)}–${fmtP(p[z].hi)}`;
+const stepAmount = (s) => (s.dist ? (s.dist >= 1000 ? fmtD(s.dist / 1000) : `${s.dist} m`) : s.time >= 60 ? `${+(s.time / 60).toFixed(1)} min` : `${s.time} s`);
 
 // Collapse "Rep 1/6, Jog, Rep 2/6 …" into one "6 ×" block for display.
 function groupSteps(steps) {
@@ -57,7 +62,7 @@ function groupSteps(steps) {
 function stepRow(s, p) {
   return `<div class="step"><span class="zdot" style="background:${ZONES[s.zone].color}"></span>
     <div class="grow"><b>${esc(s.label)}</b> <span class="muted">${stepAmount(s)}</span></div>
-    <div class="pace">${paceRange(s.zone, p)}<small>/km</small></div></div>`;
+    <div class="pace">${paceRange(s.zone, p)}<small>${paceUnit()}</small></div></div>`;
 }
 
 function stepsHtml(w, p) {
@@ -73,14 +78,14 @@ function workoutCard(w, p, opts = {}) {
   const st = statusOf(w);
   const color = TYPE_COLOR[w.type] || 'var(--muted)';
   const run = runFor(w);
-  const est = w.kind === 'run' ? `${fmtKm(w.km)} km · ~${fmtDur(estSec(w, p)).replace(/:\d\d$/, '')} ${estSec(w, p) >= 3600 ? 'h' : 'min'}` : w.summary;
+  const est = w.kind === 'run' ? `${fmtD(w.km)} · ~${fmtDur(estSec(w, p)).replace(/:\d\d$/, '')} ${estSec(w, p) >= 3600 ? 'h' : 'min'}` : w.summary;
   return `<div class="wcard ${st || ''}" style="--c:${color}" data-act="${w.kind === 'gym' ? 'openGym' : 'openWorkout'}" data-id="${w.id}">
     <div class="wbar"></div>
     <div class="grow">
       ${opts.showDate ? `<div class="eyebrow">${fmtDate(w.date)}</div>` : ''}
       <div class="wtitle">${esc(w.title)} ${st === 'done' ? `<span class="chip good">${icon('check')} Done</span>` : st === 'skipped' ? '<span class="chip">Skipped</span>' : ''}</div>
-      <div class="muted">${esc(w.kind === 'run' ? w.summary : est)}</div>
-      ${w.kind === 'run' ? `<div class="meta">${run ? `${fmtKm(run.distKm)} km · ${fmtDur(run.durSec)} · ${fmtPace(run.durSec / run.distKm)}/km` : est}</div>` : ''}
+      <div class="muted">${esc(w.kind === 'run' ? uText(w.summary) : est)}</div>
+      ${w.kind === 'run' ? `<div class="meta">${run ? `${fmtD(run.distKm)} · ${fmtDur(run.durSec)} · ${fmtP(run.durSec / run.distKm)}${paceUnit()}` : est}</div>` : ''}
     </div>
     ${opts.cta && !st && w.date === today() ? `<button class="btn primary sm" data-act="${w.kind === 'gym' ? 'openGym' : 'startRun'}" data-id="${w.id}">${icon(w.kind === 'gym' ? 'dumbbell' : 'play')} Start</button>` : icon('chev')}
   </div>`;
@@ -195,6 +200,71 @@ function rebuildPlan() {
   save();
 }
 
+// ---------------- WHOOP-style building blocks ----------------
+function ring(pct, color, value, label, sub = '', act = '') {
+  const r = 42, c = 2 * Math.PI * r, off = c * (1 - clamp(pct || 0, 0, 1));
+  return `<button class="wring" ${act ? `data-act="${act}"` : ''} style="--rc:${color}">
+    <span class="rwrap"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="${r}" class="track"/><circle cx="50" cy="50" r="${r}" class="val" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/></svg>
+    <span class="rv">${value}</span></span><span class="rl">${label}</span>${sub ? `<span class="rs">${sub}</span>` : ''}</button>`;
+}
+
+const sleepSeries = () => Object.fromEntries(Object.entries(state.fitbit.sleep).map(([d, v]) => [d, round1(v / 60)]));
+// Health metrics available for dashboard tiles and trend rows.
+const METRIC_DEFS = {
+  hrv: { label: 'HRV', unit: 'ms', series: () => state.fitbit.metrics?.hrv, color: 'var(--rec-green)', good: 'up' },
+  rhr: { label: 'Resting HR', unit: 'bpm', series: () => state.fitbit.rhr, color: 'var(--rec-red)', good: 'down' },
+  vo2max: { label: 'VO₂ max', unit: '', series: () => state.fitbit.metrics?.vo2max, color: 'var(--accent)', good: 'up' },
+  sleep: { label: 'Sleep', unit: 'h', series: sleepSeries, color: 'var(--sleep)', good: 'up' },
+  resp: { label: 'Breathing', unit: '/min', series: () => state.fitbit.metrics?.resp, color: 'var(--z-t)', good: 'down' },
+  spo2: { label: 'SpO₂', unit: '%', series: () => state.fitbit.metrics?.spo2, color: 'var(--z-easy)' },
+  skinTemp: { label: 'Skin temp', unit: '°C', series: () => state.fitbit.metrics?.skinTemp, color: 'var(--z-i)' },
+  steps: { label: 'Steps', unit: '', series: () => state.fitbit.metrics?.steps, color: 'var(--z-long)', good: 'up', fmt: (v) => Math.round(v).toLocaleString() },
+  weight: { label: 'Weight', unit: 'kg', series: () => state.fitbit.metrics?.weight, color: 'var(--muted)' },
+  strain7: { label: '7-day strain', unit: '', series: () => strainSeries(7), color: 'var(--strain)' },
+  weekKm: { label: 'This week', unit: distUnit(), series: () => ({ [today()]: round1(toUnit(runKmBetween(state.runs, mondayOf(today()), today()))) }), color: 'var(--accent)' },
+};
+function strainSeries(days) {
+  const out = {};
+  for (let i = 0; i < 30; i++) {
+    const d = addDays(today(), -i);
+    let tot = 0;
+    for (let j = 0; j < days; j++) tot += dayStrain(state, addDays(d, -j)).strain;
+    out[d] = round1(tot / days);
+  }
+  return out;
+}
+
+function metricStat(key) {
+  const def = METRIC_DEFS[key];
+  const series = def?.series() || {};
+  const dates = Object.keys(series).sort();
+  if (!dates.length) return null;
+  const last = series[dates.at(-1)];
+  const { baseline } = latestVsBaseline(series);
+  const diff = baseline != null ? last - baseline : null;
+  const cls = diff == null || Math.abs(diff) < Math.abs(baseline) * 0.03 ? '' : (diff > 0) === (def.good === 'up') ? 'up' : def.good ? 'down' : '';
+  return { def, series, last, diff, cls, val: def.fmt ? def.fmt(last) : last };
+}
+
+function metricTile(key) {
+  const m = metricStat(key);
+  const def = METRIC_DEFS[key];
+  if (!def) return '';
+  return `<div class="mtile" style="--mc:${def.color}"><div class="ml">${def.label}</div>
+    <div class="mv">${m ? m.val : '–'}<small>${m ? ` ${def.unit}` : ''}</small></div>
+    ${m?.diff != null ? `<div class="delta ${m.cls}">${m.diff > 0 ? '▲' : '▼'} ${Math.abs(round1(m.diff))}</div>` : '<div class="delta">&nbsp;</div>'}
+    ${m ? sparkline(m.series, def.color) : ''}</div>`;
+}
+
+function strainGauge(planned, current, target) {
+  const pos = (v) => `${(clamp(v, 0, 21) / 21) * 100}%`;
+  return `<div class="gauge">
+    ${target ? `<span class="band" style="left:${pos(target[0])};width:calc(${pos(target[1])} - ${pos(target[0])})"></span>` : ''}
+    <span class="fill" style="width:${pos(current)}"></span>
+    ${planned ? `<span class="mark" style="left:${pos(planned)}" title="planned"></span>` : ''}
+  </div><div class="gscale"><span>0</span><span>7</span><span>14</span><span>21</span></div>`;
+}
+
 // ---------------- views ----------------
 function viewToday() {
   const t = today();
@@ -203,18 +273,22 @@ function viewToday() {
   const dtr = daysBetween(t, pr.raceDate);
   const ws = allWorkouts(state.plan);
   const todays = ws.filter((w) => w.date === t);
-  const upcoming = ws.filter((w) => w.date > t).slice(0, 4);
+  const upcoming = ws.filter((w) => w.date > t).slice(0, 3);
   const wk = weekOf(state.plan, t);
   const rd = readiness(state);
+  const st = dayStrain(state, t);
+  const sl = sleepPerf(state, t);
   const ins = insights(state).slice(0, 3);
-  const hour = new Date().getHours();
-  const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const plannedRun = todays.find((w) => w.kind === 'run' && !statusOf(w));
+  const planned = round1(sum(todays.filter((w) => !statusOf(w)), (w) => plannedStrain(w, p)));
+  const target = targetStrain(rd?.score);
+  const tiles = (state.settings.tiles || DEFAULT_TILES).filter((k) => METRIC_DEFS[k]);
 
   let weekStrip = '';
   if (wk) {
     const doneKm = runKmBetween(state.runs, wk.start, addDays(wk.start, 6));
     weekStrip = `<section class="card">
-      <div class="row between"><h3>This week</h3><span class="muted">${fmtKm(doneKm)} / ${fmtKm(wk.plannedKm)} km</span></div>
+      <div class="row between"><h3>This week</h3><span class="muted">${fmtKm(toUnit(doneKm))} / ${fmtD(wk.plannedKm)}</span></div>
       <div class="bar"><span style="width:${Math.min(100, (doneKm / Math.max(1, wk.plannedKm)) * 100)}%"></span></div>
       <div class="strip">${[0, 1, 2, 3, 4, 5, 6].map((d) => {
         const date = addDays(wk.start, d);
@@ -224,16 +298,29 @@ function viewToday() {
   }
 
   const starts = state.plan.start > t ? `<section class="card hero-sub">${icon('calendar')} Your plan starts <b>${fmtDate(state.plan.start)}</b>. Until then, keep running easy 3–4× a week and get a couple of strength sessions in.</section>` : '';
+  const recSub = rd ? rd.label : google.signedIn(state) ? 'Connect Fitbit' : 'Sign in + Fitbit';
 
   return `<header class="top">
-      <div><div class="eyebrow">${fmtDate(t, { weekday: 'long', day: 'numeric', month: 'long' })}</div><h1>${greet}${pr.name ? `, ${esc(pr.name)}` : ''}</h1></div>
+      <div><div class="eyebrow">${fmtDate(t, { weekday: 'long', day: 'numeric', month: 'long' })}</div><h1>${pr.name ? esc(pr.name) : 'Today'}</h1></div>
       <div class="countdown"><b>${dtr}</b><span>days to<br>${DISTANCES[pr.goal].label.replace(' marathon', '')}</span></div>
     </header>
+    <section class="rings">
+      ${ring(rd ? rd.score / 100 : 0, recoveryColor(rd?.score), rd ? `${rd.score}<small>%</small>` : '–', 'Recovery', recSub, rd ? 'openRecovery' : 'tab" data-tab="settings')}
+      ${ring(st.strain / 21, 'var(--strain)', st.strain.toFixed(1), 'Strain', target ? `Target ${target[0]}–${target[1]}` : `Planned ${planned}`, 'openStrain')}
+      ${ring(sl ? sl.pct / 100 : 0, 'var(--sleep)', sl ? `${sl.pct}<small>%</small>` : '–', 'Sleep', sl ? `${Math.floor(sl.min / 60)}h ${sl.min % 60}m` : 'No data', 'openSleep')}
+    </section>
     ${starts}
-    ${rd ? `<section class="card readiness"><div class="ring" style="--v:${rd.score}"><b>${rd.score}</b></div><div><b>${rd.label}</b><div class="muted small">${esc(rd.notes.join(' · '))}</div></div></section>` : ''}
+    <section class="card coachline">
+      <div class="row between"><b>${rd ? (rd.score >= 67 ? 'Green light. Go after it today.' : rd.score >= 34 ? 'Moderate recovery. Train, but don’t force it.' : 'Low recovery. Keep today easy.') : 'Today’s strain'}</b><span class="muted small">${st.strain.toFixed(1)} / 21</span></div>
+      ${strainGauge(planned, st.strain, target)}
+      <div class="muted small">${plannedRun ? `Today’s ${esc(plannedRun.title.toLowerCase())} should add ~${plannedStrain(plannedRun, p)} strain.` : 'No run planned today.'}${target ? ` Recommended for your recovery: ${target[0]}–${target[1]}.` : ''}</div>
+      ${rd && rd.score < 34 && plannedRun && !['easy', 'long', 'race'].includes(plannedRun.type) ? `<button class="btn sm primary" data-act="swapEasy" data-id="${plannedRun.id}">Swap to easy</button>` : ''}
+    </section>
     <h2 class="sec">Today</h2>
     ${todays.length ? todays.map((w) => workoutCard(w, p, { cta: true })).join('') : `<div class="wcard rest"><div class="grow"><div class="wtitle">Rest day</div><div class="muted">Recovery is where the adaptation happens. A walk or 10 minutes of mobility is plenty.</div></div></div>`}
     <button class="btn ghost block" data-act="startRun" data-id="">${icon('play')} Start a free run</button>
+    <div class="row between"><h2 class="sec">Health monitor</h2><button class="btn sm ghost" data-act="editTiles">Customise</button></div>
+    <div class="tiles">${tiles.map(metricTile).join('')}</div>
     ${ins.length ? `<h2 class="sec">Coach</h2>${ins.map(insightCard).join('')}` : ''}
     ${weekStrip}
     ${upcoming.length ? `<h2 class="sec">Up next</h2>${upcoming.map((w) => workoutCard(w, p, { showDate: true })).join('')}` : ''}`;
@@ -253,7 +340,7 @@ function viewPlan() {
       const done = runKmBetween(state.runs, w.start, addDays(w.start, 6));
       return `<details class="week" ${open ? 'open' : ''}>
         <summary><div><b>Week ${w.index}</b> <span class="chip" style="--c:${phaseColors[w.phase]}">${w.phase}${w.cutback ? ' · recovery' : ''}</span><div class="muted small">${fmtDate(w.start, { day: 'numeric', month: 'short' })} – ${fmtDate(addDays(w.start, 6), { day: 'numeric', month: 'short' })}</div></div>
-        <div class="wkkm"><b>${fmtKm(w.plannedKm)}</b> km${w.start <= t ? `<div class="muted small">${fmtKm(done)} done</div>` : ''}</div></summary>
+        <div class="wkkm"><b>${fmtKm(toUnit(w.plannedKm))}</b> ${distUnit()}${w.start <= t ? `<div class="muted small">${fmtKm(toUnit(done))} done</div>` : ''}</div></summary>
         ${w.workouts.map((x) => workoutCard(x, p, { showDate: true })).join('') || '<p class="muted">No sessions this week.</p>'}
       </details>`;
     }).join('')}`;
@@ -283,8 +370,8 @@ function weeklyChart() {
   const start = addDays(mondayOf(t), -7 * 9);
   const weeks = Array.from({ length: 14 }, (_, i) => addDays(start, i * 7));
   const data = weeks.map((ws) => ({
-    ws, actual: ws <= t ? runKmBetween(state.runs, ws, addDays(ws, 6)) : null,
-    planned: weekOf(state.plan, ws)?.plannedKm ?? 0, cur: ws === mondayOf(t),
+    ws, actual: ws <= t ? toUnit(runKmBetween(state.runs, ws, addDays(ws, 6))) : null,
+    planned: toUnit(weekOf(state.plan, ws)?.plannedKm ?? 0), cur: ws === mondayOf(t),
   }));
   const max = Math.max(10, ...data.map((d) => Math.max(d.actual || 0, d.planned)));
   const W = 340, H = 150, bw = W / data.length;
@@ -308,35 +395,32 @@ function sparkline(series, color) {
   return `<svg viewBox="0 -2 ${W} ${H + 4}" class="spark"><path d="${d}" style="stroke:${color}"/></svg>`;
 }
 
-// All the Fitbit health data in one card: latest value, change vs 2-week baseline, 30-day trend.
+// 14 days of Recovery (dots) vs Strain (bars), WHOOP-style.
+function trendChart(days = 14) {
+  const data = Array.from({ length: days }, (_, i) => {
+    const d = addDays(today(), i - days + 1);
+    return { d, rec: readiness(state, d)?.score ?? null, strain: dayStrain(state, d).strain, sleep: sleepPerf(state, d)?.pct ?? null };
+  });
+  const W = 340, H = 150, bw = W / days, base = H - 18;
+  const yS = (v) => base - (v / 21) * (base - 10), yR = (v) => base - (v / 100) * (base - 10);
+  const recPts = data.map((x, i) => (x.rec != null ? [i * bw + bw / 2, yR(x.rec), x.rec] : null)).filter(Boolean);
+  return `<svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Recovery and strain, last ${days} days">
+    ${data.map((x, i) => `<rect x="${i * bw + bw * 0.22}" y="${yS(x.strain)}" width="${bw * 0.56}" height="${base - yS(x.strain)}" rx="3" class="sbar"/>
+      <text x="${i * bw + bw / 2}" y="${H - 4}" text-anchor="middle" class="axis ${x.d === today() ? 'cur' : ''}">${fmtDate(x.d, { weekday: 'narrow' })}</text>`).join('')}
+    ${recPts.length > 1 ? `<path d="${recPts.map(([x, y], k) => `${k ? 'L' : 'M'}${x},${y}`).join('')}" class="recline"/>` : ''}
+    ${recPts.map(([x, y, v]) => `<circle cx="${x}" cy="${y}" r="4.5" style="fill:${recoveryColor(v)}"/>`).join('')}
+  </svg><div class="legend"><span><i style="background:var(--strain)"></i>strain (0–21)</span><span><i style="background:var(--rec-green);border-radius:50%"></i>recovery %</span></div>`;
+}
+
 function healthCard() {
-  const fb = state.fitbit;
-  const m = fb.metrics || {};
-  const rows = [
-    { key: 'vo2max', label: 'VO₂ max', unit: '', series: m.vo2max, color: 'var(--accent)', good: 'up' },
-    { key: 'rhr', label: 'Resting HR', unit: 'bpm', series: fb.rhr, color: 'var(--alert)', good: 'down' },
-    { key: 'hrv', label: 'HRV', unit: 'ms', series: m.hrv, color: 'var(--good)', good: 'up' },
-    { key: 'sleep', label: 'Sleep', unit: 'h', series: Object.fromEntries(Object.entries(fb.sleep).map(([d, v]) => [d, round1(v / 60)])), color: 'var(--gym)', good: 'up' },
-    { key: 'spo2', label: 'SpO₂', unit: '%', series: m.spo2, color: 'var(--z-easy)' },
-    { key: 'resp', label: 'Breathing rate', unit: '/min', series: m.resp, color: 'var(--z-t)', good: 'down' },
-    { key: 'skinTemp', label: 'Skin temp', unit: '°C', series: m.skinTemp, color: 'var(--z-i)' },
-    { key: 'steps', label: 'Steps', unit: '', series: m.steps, color: 'var(--z-long)', good: 'up' },
-    { key: 'weight', label: 'Weight', unit: 'kg', series: m.weight, color: 'var(--muted)' },
-  ].filter((r) => r.series && Object.keys(r.series).length);
+  const rows = Object.keys(METRIC_DEFS).map((k) => [k, metricStat(k)]).filter(([, m]) => m && Object.keys(m.series).length > 1);
   if (!rows.length) return '';
-  return `<section class="card"><h3>Health & recovery</h3>
-    ${rows.map((r) => {
-      const dates = Object.keys(r.series).sort();
-      const last = r.series[dates[dates.length - 1]];
-      const { baseline } = latestVsBaseline(r.series);
-      const diff = baseline != null ? last - baseline : null;
-      const cls = diff == null || Math.abs(diff) < Math.abs(baseline) * 0.03 ? '' : (diff > 0) === (r.good === 'up') ? 'up' : r.good ? 'down' : '';
-      return `<div class="hm"><div class="grow"><div class="muted small">${r.label}</div>
-        <b>${r.key === 'steps' ? Math.round(last).toLocaleString() : last}<small> ${r.unit}</small></b>
-        ${diff != null ? `<span class="delta ${cls}">${diff > 0 ? '▲' : '▼'} ${Math.abs(round1(diff))} vs 2-wk avg</span>` : ''}</div>
-        ${sparkline(r.series, r.color)}</div>`;
-    }).join('')}
-    <p class="muted small">Last 30 days from Fitbit. Low HRV, a rising resting HR or higher skin temperature lowers today's readiness score.</p></section>`;
+  return `<section class="card"><h3>Health trends</h3>
+    ${rows.map(([k, m]) => `<div class="hm"><div class="grow"><div class="muted small">${m.def.label}</div>
+        <b>${m.val}<small> ${m.def.unit}</small></b>
+        ${m.diff != null ? `<span class="delta ${m.cls}">${m.diff > 0 ? '▲' : '▼'} ${Math.abs(round1(m.diff))} vs 2-wk avg</span>` : ''}</div>
+        ${sparkline(m.series, m.def.color)}</div>`).join('')}
+    <p class="muted small">Last 30 days. Low HRV, a rising resting HR or higher skin temperature lowers your recovery.</p></section>`;
 }
 
 function viewProgress() {
@@ -353,17 +437,18 @@ function viewProgress() {
       <div class="preds">${Object.entries(DISTANCES).map(([k, d]) => `<div class="${k === pr.goal ? 'goal' : ''}"><span>${d.label.replace('Half marathon', 'Half')}</span><b>${fmtDur(predictTime(pr.vdot, d.m))}</b></div>`).join('')}</div>
     </section>
     <section class="card"><h3>Your training paces</h3>
-      ${['E', 'M', 'T', 'I', 'R'].map((z) => `<div class="step"><span class="zdot" style="background:${ZONES[z].color}"></span><div class="grow"><b>${ZONES[z].name}</b><div class="muted small">${ZONES[z].desc}</div></div><div class="pace">${paceRange(z, p)}<small>/km</small></div></div>`).join('')}
+      ${['E', 'M', 'T', 'I', 'R'].map((z) => `<div class="step"><span class="zdot" style="background:${ZONES[z].color}"></span><div class="grow"><b>${ZONES[z].name}</b><div class="muted small">${ZONES[z].desc}</div></div><div class="pace">${paceRange(z, p)}<small>${paceUnit()}</small></div></div>`).join('')}
     </section>
-    <section class="card"><h3>Weekly distance</h3>${weeklyChart()}</section>
+    <section class="card"><h3>Recovery vs strain</h3>${trendChart()}</section>
+    <section class="card"><h3>Weekly distance <span class="muted small">(${distUnit()})</span></h3>${weeklyChart()}</section>
     ${healthCard()}
     <h2 class="sec">Coach insights</h2>
     ${ins.length ? ins.map(insightCard).join('') : '<p class="muted">Log a few runs and the coach starts adapting your plan.</p>'}
     <div class="row between"><h2 class="sec">Runs</h2><button class="btn sm" data-act="logRun" data-id="">+ Log run</button></div>
     ${runs.length ? runs.map((r) => {
       const w = r.workoutId && workoutById(state, r.workoutId);
-      return `<div class="hist"><span class="zdot" style="background:${TYPE_COLOR[w?.type] || 'var(--muted)'}"></span><div class="grow"><b>${esc(w?.title || r.name || 'Run')}</b>
-        <div class="muted small">${fmtDate(r.date)} · ${fmtKm(r.distKm)} km · ${fmtDur(r.durSec)} · ${fmtPace(r.durSec / r.distKm)}/km${r.avgHr ? ` · ${r.avgHr}${r.maxHr ? `/${r.maxHr}` : ''} bpm` : ''} · ${r.source}</div></div>
+      return `<div class="hist tap" data-act="openRun" data-id="${r.id}">${routeSvg(r, { w: 54, h: 40, cls: 'route thumb' }) || `<span class="zdot" style="background:${TYPE_COLOR[w?.type] || 'var(--muted)'}"></span>`}<div class="grow"><b>${esc(w?.title || r.name || 'Run')}${r.stravaId ? ' <span class="chip strava">Strava</span>' : ''}${r.songs?.length ? ` <span class="chip spot">♫ ${r.songs.length}</span>` : ''}</b>
+        <div class="muted small">${fmtDate(r.date)} · ${fmtD(r.distKm)} · ${fmtDur(r.durSec)} · ${fmtP(r.durSec / r.distKm)}${paceUnit()}${r.avgHr ? ` · ${r.avgHr}${r.maxHr ? `/${r.maxHr}` : ''} bpm` : ''} · ${r.source}</div></div>
         <button class="x" data-act="deleteRun" data-id="${r.id}" aria-label="Delete run">×</button></div>`;
     }).join('') : '<p class="muted">No runs yet.</p>'}`;
 }
@@ -391,6 +476,57 @@ function accountCard() {
     ${state.syncError ? `<div class="err">${esc(state.syncError)}</div>` : ''}</section>`;
 }
 
+function prefsCard() {
+  const u = state.settings.units;
+  return `<section class="card"><h3>Units & dashboard</h3>
+    <div class="seg"><button class="${u !== 'mi' ? 'on' : ''}" data-act="setUnits" data-u="km">Kilometres</button><button class="${u === 'mi' ? 'on' : ''}" data-act="setUnits" data-u="mi">Miles</button></div>
+    <button class="btn block" data-act="editTiles">Choose health-monitor metrics</button></section>`;
+}
+
+function voiceCard() {
+  const v = { ...DEFAULT_VOICE, ...state.settings.voice };
+  const tg = (k, label) => `<label class="check"><input type="checkbox" data-voice="${k}" ${v[k] ? 'checked' : ''}> ${label}</label>`;
+  return `<section class="card"><h3>Voice coach</h3>
+    <p class="muted small">Spoken cues during guided runs, over your music. You can also tap the stats on the run screen at any time to hear distance, time and pace.</p>
+    ${tg('on', 'Voice cues on')}
+    <label>Announce every<select data-voice="every">${[0.5, 1, 2, 5].map((n) => `<option value="${n}" ${+v.every === n ? 'selected' : ''}>${n} ${distUnit()}</option>`).join('')}</select></label>
+    ${tg('time', 'Total time')}${tg('pace', 'Split pace')}${tg('avgPace', 'Average pace')}
+    ${tg('alerts', 'Pace alerts when you drift off target')}${tg('countdown', 'Countdowns at the end of reps')}
+    <button class="btn sm" data-act="testVoice">Test voice</button></section>`;
+}
+
+function stravaCard() {
+  const c = strava.cfg(state);
+  if (strava.connected(state)) {
+    const pending = state.runs.filter((r) => r.source === 'gps' && !r.stravaId).length;
+    return `<section class="card"><h3><span class="brand-dot strava"></span>Strava</h3>
+      <p class="muted small">Connected${c.athlete?.name ? ` as ${esc(c.athlete.name)}` : ''}. Imports your runs and map outlines${c.autoPush ? ', and uploads runs you record in Stride' : ''}.${c.lastSync ? ` Last sync ${new Date(c.lastSync).toLocaleTimeString()}.` : ''}</p>
+      <label class="check"><input type="checkbox" data-act-change="stravaAuto" ${c.autoPush ? 'checked' : ''}> Auto-upload Stride GPS runs</label>
+      ${pending ? `<p class="muted small">${pending} Stride run(s) not on Strava yet.</p>` : ''}
+      <div class="row gap"><button class="btn primary" data-act="stravaSync">${icon('sync')} Sync Strava</button><button class="btn ghost" data-act="stravaDisconnect">Disconnect</button></div>
+      ${c.error ? `<div class="err">${esc(c.error)}</div>` : ''}</section>`;
+  }
+  return `<section class="card"><h3><span class="brand-dot strava"></span>Strava</h3>
+    <p class="muted small">Push your runs to Strava and pull map outlines. One-time setup: create an API app at <b>strava.com/settings/api</b> with Authorization Callback Domain <code>${esc(location.hostname)}</code>, then paste its Client ID and Client Secret here. They’re stored only on your devices and in your private Drive sync.</p>
+    <div class="row2"><label>Client ID<input id="stravaId" value="${esc(c.clientId || '')}" inputmode="numeric"></label>
+    <label>Client Secret<input id="stravaSecret" type="password" value="${esc(c.clientSecret || '')}" autocapitalize="off"></label></div>
+    <button class="btn primary block strava-btn" data-act="stravaConnect">Connect with Strava</button>
+    ${c.error ? `<div class="err">${esc(c.error)}</div>` : ''}</section>`;
+}
+
+function spotifyCard() {
+  const id = spotify.clientIdOf(state);
+  if (spotify.connected()) {
+    return `<section class="card"><h3><span class="brand-dot spot"></span>Spotify</h3>
+      <p class="muted small">Connected. Shows what’s playing during runs and saves the songs you listened to with each run.</p>
+      <button class="btn ghost" data-act="spotifyDisconnect">Disconnect</button></section>`;
+  }
+  return `<section class="card"><h3><span class="brand-dot spot"></span>Spotify</h3>
+    <p class="muted small">See the songs from each run. One-time setup: create an app at <b>developer.spotify.com/dashboard</b> (Web API), add redirect URI <code>${esc(google.redirectUri())}</code>, add your Spotify email under <b>User Management</b>, then paste the Client ID here.</p>
+    <label>Client ID<input id="spotifyId" value="${esc(id)}" autocapitalize="off" spellcheck="false"></label>
+    <button class="btn block spot-btn" data-act="spotifyConnect">Connect Spotify</button></section>`;
+}
+
 function viewSettings() {
   const fb = state.fitbit;
   const pr = state.profile;
@@ -405,6 +541,10 @@ function viewSettings() {
       <p class="muted small">${DISTANCES[pr.goal].label} on ${fmtDate(pr.raceDate, { day: 'numeric', month: 'long', year: 'numeric' })} · ${pr.runDays.length} runs/week · ${pr.gymDays.length} gym/week · volume ×${pr.volumeScale ?? 1}</p>
       <button class="btn block" data-act="editProfile">Edit profile & rebuild plan</button>
     </section>
+    ${prefsCard()}
+    ${voiceCard()}
+    ${stravaCard()}
+    ${spotifyCard()}
     <section class="card">
       <h3>Fitbit via Google Health</h3>
       <p class="muted small">Pulls runs (distance, time, avg/max heart rate, calories), VO₂ max, HRV, resting heart rate, sleep, SpO₂, breathing rate, skin temperature, steps and weight from your Fitbit through Google’s Health API.</p>
@@ -456,11 +596,11 @@ function openWorkout(id) {
   openSheet(`
     <div class="eyebrow">${fmtDate(w.date, { weekday: 'long', day: 'numeric', month: 'long' })} · ${w.phase}</div>
     <h2 style="--c:${TYPE_COLOR[w.type]}" class="stitle">${esc(w.title)}</h2>
-    <p class="lead">${esc(w.summary)}</p>
-    <div class="stats3"><div><b>${fmtKm(w.km)}</b><span>km</span></div><div><b>${fmtDur(estSec(w, p))}</b><span>est. time</span></div><div><b>${w.steps.length}</b><span>steps</span></div></div>
+    <p class="lead">${esc(uText(w.summary))}</p>
+    <div class="stats3"><div><b>${fmtKm(toUnit(w.km))}</b><span>${distUnit()}</span></div><div><b>${fmtDur(estSec(w, p))}</b><span>est. time</span></div><div><b>${w.steps.length}</b><span>steps</span></div></div>
     <div class="steps">${stepsHtml(w, p)}</div>
     <div class="why"><b>Why this session</b><p>${esc(w.purpose)}</p></div>
-    ${run ? `<div class="card done-card">${icon('check')} Completed: ${fmtKm(run.distKm)} km in ${fmtDur(run.durSec)} (${fmtPace(run.durSec / run.distKm)}/km)${run.avgHr ? `, ${run.avgHr} bpm` : ''}</div>` : ''}
+    ${run ? `<div class="card done-card">${icon('check')} Completed: ${fmtD(run.distKm)} in ${fmtDur(run.durSec)} (${fmtP(run.durSec / run.distKm)}${paceUnit()})${run.avgHr ? `, ${run.avgHr} bpm` : ''}</div>` : ''}
     <div class="actions">
       ${!st ? `<button class="btn primary block" data-act="startRun" data-id="${w.id}">${icon('play')} Start guided run</button>
         <div class="row gap"><button class="btn grow" data-act="logRun" data-id="${w.id}">Log manually</button>
@@ -475,7 +615,7 @@ function openLogRun(id) {
   openSheet(`<h2>Log a run</h2>
     <form id="logForm">
       <div class="row2"><label>Date<input type="date" name="date" value="${w?.date || today()}" max="${today()}"></label>
-      <label>Distance (km)<input type="number" step="0.01" name="km" required value="${w ? w.km : ''}" inputmode="decimal"></label></div>
+      <label>Distance (${distUnit()})<input type="number" step="0.01" name="km" required value="${w ? round1(toUnit(w.km)) : ''}" inputmode="decimal"></label></div>
       <div class="row2"><label>Time (h:mm:ss)<input name="time" required placeholder="45:00" inputmode="numeric"></label>
       <label>Avg HR <span class="muted">(opt.)</span><input type="number" name="hr" inputmode="numeric"></label></div>
       <label>Effort (RPE): <output id="rpeOut">5</output>/10<input type="range" name="rpe" min="1" max="10" value="5" oninput="rpeOut.value=this.value"></label>
@@ -486,12 +626,12 @@ function openLogRun(id) {
     e.preventDefault();
     const f = new FormData(e.target);
     const durSec = parseDur(f.get('time'));
-    const distKm = Number(f.get('km'));
+    const distKm = Number(f.get('km')) * (isMi() ? KM_PER_MI : 1);
     if (!(durSec > 0) || !(distKm > 0)) return toast('Enter distance and time');
-    const run = { id: uid(), source: 'manual', name: w?.title || 'Run', date: f.get('date'), distKm, durSec, avgHr: Number(f.get('hr')) || null, rpe: Number(f.get('rpe')), isRace: !!f.get('isRace') };
+    const run = { id: uid(), at: Date.now(), source: 'manual', name: w?.title || 'Run', date: f.get('date'), distKm: Math.round(distKm * 100) / 100, durSec, avgHr: Number(f.get('hr')) || null, rpe: Number(f.get('rpe')), isRace: !!f.get('isRace') };
     addRun(run, w?.date === run.date ? w : null);
     closeSheet();
-    toast(`Saved ${fmtKm(distKm)} km at ${fmtPace(durSec / distKm)}/km`);
+    toast(`Saved ${fmtD(distKm)} at ${fmtP(durSec / distKm)}${paceUnit()}`);
   });
 }
 
@@ -548,11 +688,150 @@ function openGym(workout, sessionKey) {
   });
 }
 
+// ---------------- run detail ----------------
+function openRun(id) {
+  const r = state.runs.find((x) => x.id === id);
+  if (!r) return;
+  const w = r.workoutId && workoutById(state, r.workoutId);
+  const strain = round1(21 * (1 - Math.exp(-runLoad(state, r) / 110)));
+  const map = routeSvg(r, { w: 340, h: 220, cls: 'route big' });
+  openSheet(`
+    <div class="eyebrow">${fmtDate(r.date, { weekday: 'long', day: 'numeric', month: 'long' })} · ${esc(r.source)}</div>
+    <h2 class="stitle" style="--c:${TYPE_COLOR[w?.type] || 'var(--accent)'}">${esc(w?.title || r.name || 'Run')}</h2>
+    ${map ? `<div class="mapbox">${map}</div>` : `<div class="mapbox empty muted small">${r.stravaId ? 'No GPS map on this activity' : 'No map yet. GPS runs and Strava-synced runs show their route here.'}</div>`}
+    <div class="stats3">
+      <div><b>${fmtKm(toUnit(r.distKm))}</b><span>${distUnit()}</span></div>
+      <div><b>${fmtDur(r.durSec)}</b><span>time</span></div>
+      <div><b>${fmtP(r.durSec / r.distKm)}</b><span>${paceUnit()}</span></div>
+      <div><b>${r.avgHr || '–'}</b><span>avg bpm</span></div>
+      <div><b>${r.maxHr || '–'}</b><span>max bpm</span></div>
+      <div><b style="color:var(--strain)">${strain}</b><span>strain</span></div>
+    </div>
+    ${r.songs?.length ? `<h3>Soundtrack</h3><div class="songs">${r.songs.map((x) => `<a class="song" href="${esc(x.url || '#')}" target="_blank" rel="noopener">${x.img ? `<img src="${esc(x.img)}" alt="">` : '<span class="brand-dot spot"></span>'}<div class="grow"><b>${esc(x.name)}</b><div class="muted small">${esc(x.artist)}</div></div><span class="muted small">${new Date(x.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></a>`).join('')}</div>`
+      : spotify.connected() ? `<button class="btn block" data-act="findSongs" data-id="${r.id}">♫ Find songs from this run</button>` : ''}
+    <div class="actions">
+      ${r.stravaId ? `<a class="btn block strava-btn" href="${strava.activityUrl(r.stravaId)}" target="_blank" rel="noopener">View on Strava</a>`
+        : strava.connected(state) ? `<button class="btn block strava-btn" data-act="pushStrava" data-id="${r.id}">Upload to Strava</button>` : ''}
+      <button class="btn block ghost danger" data-act="deleteRun" data-id="${r.id}">Delete run</button>
+    </div>`);
+}
+
+function runDescription(run) {
+  const w = run.workoutId && workoutById(state, run.workoutId);
+  const lines = [];
+  if (w) lines.push(`${w.title}: ${w.summary}`);
+  if (run.songs?.length) lines.push(`🎧 ${run.songs.slice(0, 8).map((x) => `${x.name} (${x.artist})`).join(', ')}`);
+  lines.push('Recorded with Stride');
+  return lines.join('\n');
+}
+
+async function attachSongs(run, quiet = true) {
+  if (!spotify.connected() || run.songs?.length) return;
+  try {
+    const songs = await spotify.songsForRun(state, run);
+    if (songs.length) { run.songs = songs; run.at = Date.now(); save(); render(); }
+    else if (!quiet) toast('No Spotify plays found during this run (Spotify only keeps your last 50 plays)');
+  } catch (e) { if (!quiet) toast(e.message); }
+}
+
+async function pushToStrava(run, quiet = false) {
+  try {
+    if (!quiet) toast('Uploading to Strava…', 1500);
+    await strava.push(state, run, runDescription(run));
+    strava.cfg(state).error = null;
+    state.integrationsAt = Date.now();
+    save(); render();
+    toast('Uploaded to Strava');
+  } catch (e) {
+    strava.cfg(state).error = e.message; save(true);
+    if (!quiet) toast(e.message);
+  }
+}
+
+async function afterRunSaved(run) {
+  await attachSongs(run);
+  if (strava.connected(state) && strava.cfg(state).autoPush && run.source === 'gps') pushToStrava(run, true);
+}
+
+let stravaBusy = false;
+async function stravaSync(quiet = false) {
+  if (!strava.connected(state) || stravaBusy) return;
+  stravaBusy = true;
+  try {
+    const fresh = [];
+    const res = await strava.sync(state, (r) => { matchRun(state, r); fresh.push(r); });
+    strava.cfg(state).error = null;
+    state.integrationsAt = Date.now();
+    save(); render();
+    for (const r of fresh) if (Date.now() - Date.parse(r.startTime) < 36 * 3600e3) attachSongs(r);
+    if (strava.cfg(state).autoPush) {
+      const since = (strava.cfg(state).connectedAt || Date.now()) - 7 * 864e5; // don't back-fill your whole history
+      for (const r of state.runs.filter((x) => x.source === 'gps' && !x.stravaId && !x.stravaFailed && (x.at || 0) >= since)) {
+        await pushToStrava(r, true);
+        if (!r.stravaId) r.stravaFailed = true;
+      }
+    }
+    if (!quiet) toast(`Strava: ${res.added} new run(s), ${res.linked} map(s) linked`);
+  } catch (e) {
+    strava.cfg(state).error = e.message; save(true); render();
+    if (!quiet) toast(e.message);
+  } finally { stravaBusy = false; }
+}
+
+// Now playing during guided runs
+let nowPlaying = null, npTimer = null;
+function startNowPlaying() {
+  if (!spotify.connected()) return;
+  const poll = async () => { try { nowPlaying = await spotify.nowPlaying(state); renderTracker(); } catch { /* offline */ } };
+  poll();
+  npTimer = setInterval(poll, 20000);
+}
+function stopNowPlaying() { clearInterval(npTimer); npTimer = null; nowPlaying = null; }
+
+// Recovery / strain / sleep detail sheets
+function openRecovery() {
+  const rd = readiness(state);
+  if (!rd) return;
+  openSheet(`<div class="eyebrow">Recovery</div><h2 style="color:${recoveryColor(rd.score)}">${rd.score}% · ${rd.label}</h2>
+    <ul class="why-list">${rd.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>
+    <p class="muted small">Recovery combines HRV vs your 2-week baseline (the biggest factor), resting heart rate, sleep, breathing rate, skin temperature and SpO₂ from Fitbit, plus your training load over the last 3 days. Green (67+) means push, yellow (34–66) means train normally, red means go easy.</p>
+    <section class="card"><h3>Last 14 days</h3>${trendChart()}</section>`);
+}
+function openStrain() {
+  const t = today();
+  const st = dayStrain(state, t);
+  const runsToday = state.runs.filter((r) => r.date === t);
+  openSheet(`<div class="eyebrow">Strain</div><h2 style="color:var(--strain)">${st.strain.toFixed(1)} / 21</h2>
+    ${runsToday.map((r) => `<div class="step"><div class="grow"><b>${esc(r.name || 'Run')}</b> <span class="muted">${fmtD(r.distKm)}</span></div><b>${round1(21 * (1 - Math.exp(-runLoad(state, r) / 110)))}</b></div>`).join('') || '<p class="muted">No activity logged today yet.</p>'}
+    <p class="muted small">Strain measures cardiovascular load on a 0–21 scale. It comes from your heart rate relative to your resting and max HR (TRIMP), with perceived effort used when there’s no heart-rate data. The scale is logarithmic: going from 18 to 19 takes far more work than going from 8 to 9. Gym sessions count too.</p>`);
+}
+function openSleep() {
+  const sl = sleepPerf(state);
+  if (!sl) return toast('No sleep data yet. Connect Fitbit in Settings.');
+  openSheet(`<div class="eyebrow">Sleep performance</div><h2 style="color:var(--sleep)">${sl.pct}%</h2>
+    <p>${Math.floor(sl.min / 60)}h ${sl.min % 60}m asleep of a ${Math.floor(sl.need / 60)}h ${Math.round(sl.need % 60)}m need.</p>
+    <p class="muted small">Your sleep need starts at 8 h and rises after high-strain days. Hitting 85%+ most nights is the best single thing you can do for recovery during marathon training.</p>`);
+}
+
+function openTileEditor() {
+  const cur = state.settings.tiles || DEFAULT_TILES;
+  openSheet(`<h2>Health monitor</h2><p class="muted small">Choose what shows on your Today screen.</p>
+    <form id="tileForm">${Object.entries(METRIC_DEFS).map(([k, d]) => `<label class="check"><input type="checkbox" name="t" value="${k}" ${cur.includes(k) ? 'checked' : ''}> ${d.label}</label>`).join('')}
+    <button class="btn primary block">Save</button></form>`);
+  $('#tileForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    state.settings.tiles = new FormData(e.target).getAll('t');
+    state.settingsAt = Date.now();
+    save(); closeSheet(); render();
+  });
+}
+
 // ---------------- guided run ----------------
 function startRun(id) {
   const w = id ? workoutById(state, id) : null;
   closeSheet();
-  tracker = new RunTracker(w, currentPaces(state), renderTracker);
+  tracker = new RunTracker(w, currentPaces(state), renderTracker, { unit: state.settings.units, voice: state.settings.voice });
+  startNowPlaying();
   trackerEl.hidden = false;
   document.body.classList.add('noscroll');
   renderTracker();
@@ -566,9 +845,9 @@ function renderTracker() {
     trackerEl.innerHTML = `<div class="trk ready">
       <button class="x big" data-act="tDiscard" aria-label="Close">×</button>
       <div class="eyebrow">${tr.workout ? esc(tr.workout.title) : 'Free run'}</div>
-      <h1>${tr.workout ? esc(tr.workout.summary) : 'Just run'}</h1>
+      <h1>${tr.workout ? esc(uText(tr.workout.summary)) : 'Just run'}</h1>
       ${tr.workout ? `<div class="steps">${stepsHtml(tr.workout, p)}</div>` : ''}
-      <p class="muted small">Keep the screen on and the app open. iOS pauses GPS for web apps when the phone is locked. Voice cues announce each step and every kilometre.</p>
+      <p class="muted small">Keep the screen on and the app open. iOS pauses GPS for web apps when the phone is locked. The voice coach announces each step, every ${state.settings.voice?.every || 1} ${distUnit()}, countdowns and pace alerts. Tap the stats any time to hear them.</p>
       <button class="btn primary block xl" data-act="tStart">${icon('play')} Start</button></div>`;
     return;
   }
@@ -583,16 +862,18 @@ function renderTracker() {
     <div class="gps muted small">${esc(tr.gpsStatus)}</div>
     <div class="tstep" style="--c:${ZONES[s.zone].color}">
       <div class="row between"><b>${esc(s.label)}</b><span>${tr.i + 1}/${tr.steps.length}</span></div>
-      <div class="target">${ZONES[s.zone].name} · ${fmtPace(z.lo)}–${fmtPace(z.hi)}/km</div>
+      <div class="target">${ZONES[s.zone].name} · ${fmtP(z.lo)}–${fmtP(z.hi)}${paceUnit()}</div>
       ${rem ? `<div class="remain">${rem.kind === 'dist' ? `${Math.round(rem.v)} m` : fmtDur(rem.v)}<small> left</small></div>` : ''}
       <div class="bar"><span style="width:${tr.stepProgress() * 100}%"></span></div>
     </div>
-    <div class="tgrid">
+    <div class="tgrid" data-act="tStats" title="Tap to hear your stats">
       <div><b>${fmtDur(tr.elapsed / 1000)}</b><span>time</span></div>
-      <div><b>${(tr.dist / 1000).toFixed(2)}</b><span>km</span></div>
-      <div><b>${fmtPace(cp)}</b><span>pace ${fb}</span></div>
-      <div><b>${fmtPace(tr.avgPace)}</b><span>avg pace</span></div>
+      <div><b>${toUnit(tr.dist / 1000).toFixed(2)}</b><span>${distUnit()}</span></div>
+      <div><b>${fmtP(cp)}</b><span>pace ${fb}</span></div>
+      <div><b>${fmtP(tr.avgPace)}</b><span>avg pace</span></div>
     </div>
+    <div class="muted small center">${icon('spark')} Tap stats to hear them</div>
+    ${nowPlaying ? `<div class="nowp">${nowPlaying.img ? `<img src="${esc(nowPlaying.img)}" alt="">` : '<span class="brand-dot spot"></span>'}<div class="grow"><b>${esc(nowPlaying.name)}</b><div class="muted small">${esc(nowPlaying.artist)}</div></div></div>` : ''}
     ${nxt ? `<div class="next muted">Next: ${esc(nxt.label)} · ${nxt.dist || nxt.time ? stepAmount(nxt) : ''} ${ZONES[nxt.zone].name}</div>` : ''}
     <div class="tbtns">
       ${tr.state === 'running' ? `<button class="btn xl" data-act="tPause">${icon('pause')} Pause</button>` : `<button class="btn xl primary" data-act="tResume">${icon('play')} Resume</button>`}
@@ -602,6 +883,7 @@ function renderTracker() {
 }
 
 function finishRun() {
+  stopNowPlaying();
   const run = tracker.finish();
   const w = tracker.workout;
   tracker = null;
@@ -610,7 +892,7 @@ function finishRun() {
   document.body.classList.remove('noscroll');
   if (run.distKm < 0.2) { toast('Run too short to save'); return; }
   openSheet(`<h2>Nice work!</h2>
-    <div class="stats3"><div><b>${fmtKm(run.distKm)}</b><span>km</span></div><div><b>${fmtDur(run.durSec)}</b><span>time</span></div><div><b>${fmtPace(run.durSec / run.distKm)}</b><span>/km</span></div></div>
+    <div class="stats3"><div><b>${fmtKm(toUnit(run.distKm))}</b><span>${distUnit()}</span></div><div><b>${fmtDur(run.durSec)}</b><span>time</span></div><div><b>${fmtP(run.durSec / run.distKm)}</b><span>${paceUnit()}</span></div></div>
     <form id="saveRun"><label>How hard did it feel? <output id="rpe2">5</output>/10<input type="range" name="rpe" min="1" max="10" value="5" oninput="rpe2.value=this.value"></label>
     <label class="check"><input type="checkbox" name="isRace"> Race / time trial</label>
     <button class="btn primary block">Save run</button><button type="button" class="btn ghost block" data-act="closeSheet">Discard</button></form>`);
@@ -623,6 +905,7 @@ function finishRun() {
     addRun(run, w && w.date === run.date ? w : null);
     closeSheet();
     toast('Run saved');
+    afterRunSaved(run);
   });
 }
 
@@ -652,7 +935,9 @@ async function importFiles(files) {
 async function fbSync(quiet = false) {
   try {
     if (!quiet) toast('Syncing…', 1200);
-    const rep = await health.sync(state, (r) => matchRun(state, r));
+    const fresh = [];
+    const rep = await health.sync(state, (r) => { matchRun(state, r); fresh.push(r); });
+    for (const r of fresh) if (Date.now() - Date.parse(r.startTime) < 36 * 3600e3) attachSongs(r);
     state.fitbit.error = rep.errors.length ? rep.errors.join(' · ') : null;
     save(); render();
     cloudSync(true);
@@ -700,6 +985,7 @@ const actions = {
     if (!confirm('Delete this run?')) return;
     state.runs = state.runs.filter((r) => r.id !== d.id);
     tombstone(`r:${d.id}`);
+    closeSheet();
     for (const [k, c] of Object.entries(state.completions)) if (c.runId === d.id) { delete state.completions[k]; tombstone(`c:${k}`); }
     save(); render();
   },
@@ -726,6 +1012,27 @@ const actions = {
   },
   saveClientId: () => { google.setClientId($('#clientId').value); toast('Client ID saved'); },
   syncCloud: () => cloudSync(),
+  openRun: (d) => openRun(d.id),
+  openRecovery, openStrain, openSleep,
+  editTiles: openTileEditor,
+  setUnits: (d) => { state.settings.units = d.u; state.settingsAt = Date.now(); save(); render(); },
+  testVoice: () => speak(isMi() ? '1 mile. Time 8 minutes 30 seconds. Split pace 8 30. Average pace 8 32.' : '1 kilometre. Time 5 minutes 15 seconds. Split pace 5 15. Average pace 5 18.'),
+  stravaConnect: () => {
+    const c = strava.cfg(state);
+    c.clientId = $('#stravaId').value.trim(); c.clientSecret = $('#stravaSecret').value.trim();
+    state.integrationsAt = Date.now(); save();
+    try { strava.connect(state, google.redirectUri()); } catch (e) { toast(e.message); }
+  },
+  stravaSync: () => stravaSync(),
+  stravaDisconnect: () => { if (confirm('Disconnect Strava?')) { strava.disconnect(state); state.integrationsAt = Date.now(); save(); render(); } },
+  pushStrava: (d) => { const r = state.runs.find((x) => x.id === d.id); if (r) { delete r.stravaFailed; pushToStrava(r).then(() => openRun(r.id)); } },
+  findSongs: (d) => { const r = state.runs.find((x) => x.id === d.id); if (r) attachSongs(r, false).then(() => openRun(r.id)); },
+  spotifyConnect: () => {
+    state.integrations.spotify = { clientId: $('#spotifyId').value.trim() };
+    state.integrationsAt = Date.now(); save();
+    spotify.connect(state, google.redirectUri()).catch((e) => toast(e.message));
+  },
+  spotifyDisconnect: () => { spotify.disconnect(); render(); },
   fbConnect: () => { try { google.authorize(state, { health: true }); } catch (e) { toast(e.message); } },
   fbSync: () => fbSync(),
   exportData: () => {
@@ -742,7 +1049,8 @@ const actions = {
   tResume: () => tracker.resume(),
   tNext: () => { tracker.next(); renderTracker(); },
   tFinish: () => { if (confirm('Finish and save this run?')) finishRun(); },
-  tDiscard: () => { tracker = null; trackerEl.hidden = true; trackerEl.innerHTML = ''; document.body.classList.remove('noscroll'); },
+  tStats: () => tracker?.speakStats(),
+  tDiscard: () => { stopNowPlaying(); tracker = null; trackerEl.hidden = true; trackerEl.innerHTML = ''; document.body.classList.remove('noscroll'); },
 };
 
 document.addEventListener('click', (e) => {
@@ -753,6 +1061,12 @@ document.addEventListener('click', (e) => {
   if (fn) { e.preventDefault(); e.stopPropagation(); fn(el.dataset); }
 });
 document.addEventListener('change', async (e) => {
+  const vk = e.target.dataset?.voice;
+  if (vk) {
+    state.settings.voice = { ...DEFAULT_VOICE, ...state.settings.voice, [vk]: vk === 'every' ? Number(e.target.value) : e.target.checked };
+    state.settingsAt = Date.now(); save(); return;
+  }
+  if (e.target.dataset?.actChange === 'stravaAuto') { strava.cfg(state).autoPush = e.target.checked; state.integrationsAt = Date.now(); save(); return; }
   if (e.target.id === 'importFiles') importFiles([...e.target.files]);
   if (e.target.id === 'importBackup') {
     try {
@@ -793,22 +1107,57 @@ onChange(() => {
   pushTimer = setTimeout(() => cloudSync(true), 4000);
 });
 
-const fitbitStale = () => !state.fitbit.lastSync || Date.now() - Date.parse(state.fitbit.lastSync) > 3 * 3600e3;
+const STALE_MS = 15 * 60e3;
+const fitbitStale = () => !state.fitbit.lastSync || Date.now() - Date.parse(state.fitbit.lastSync) > STALE_MS;
+const stravaStale = () => { const l = strava.cfg(state).lastSync; return !l || Date.now() - Date.parse(l) > STALE_MS; };
 
 async function freshen() {
   if (tracker) return; // never redirect away mid-run
   if (google.hasToken(state)) {
-    if (Date.now() - (state.auth.syncedAt || 0) > 2 * 60e3 || state.dirtyAt) await cloudSync(true);
+    if (Date.now() - (state.auth.syncedAt || 0) > 60e3 || state.dirtyAt) await cloudSync(true);
     if (google.healthOk(state) && fitbitStale()) fbSync(true);
+    if (strava.connected(state) && stravaStale()) stravaSync(true);
+    if (!google.healthOk(state) && fitbitStale()) google.maybeSilentRefresh(state, { health: true });
     return;
   }
+  if (strava.connected(state) && stravaStale()) stravaSync(true);
   // token expired: silently refresh if there's something to sync
-  const needed = state.dirtyAt > (state.auth?.syncedAt || 0) || Date.now() - (state.auth?.syncedAt || 0) > 30 * 60e3 || (state.auth?.healthWanted && fitbitStale());
-  google.maybeSilentRefresh(state, needed);
+  const base = state.dirtyAt > (state.auth?.syncedAt || 0) || Date.now() - (state.auth?.syncedAt || 0) > 10 * 60e3;
+  google.maybeSilentRefresh(state, { base, health: fitbitStale() });
+}
+
+// Strava / Spotify return with ?code=…&state=…
+async function handleCodeReturn() {
+  const q = new URLSearchParams(location.search);
+  if (!q.get('code') && !q.get('error')) return false;
+  history.replaceState(null, '', location.pathname);
+  let flow = {};
+  try { flow = JSON.parse(localStorage.getItem('stride.codeFlow') || '{}'); } catch { /* ignore */ }
+  tab = 'settings';
+  const name = flow.provider === 'spotify' ? 'Spotify' : 'Strava';
+  if (q.get('state') !== flow.st) { toast('Connection expired, please try again'); return true; }
+  if (q.get('error')) { toast(`${name} connection cancelled`); return true; }
+  try {
+    if (flow.provider === 'strava') {
+      await strava.finishConnect(state, q.get('code'), q.get('scope'));
+      strava.cfg(state).error = null;
+      state.integrationsAt = Date.now(); save();
+      toast('Strava connected');
+      stravaSync(true);
+    } else if (flow.provider === 'spotify') {
+      await spotify.finishConnect(state, q.get('code'), flow.verifier, google.redirectUri());
+      toast('Spotify connected');
+    }
+  } catch (e) {
+    if (flow.provider === 'strava') strava.cfg(state).error = e.message;
+    save(true); toast(e.message);
+  }
+  return true;
 }
 
 // ---------------- boot ----------------
 (async () => {
+  await handleCodeReturn();
   const r = await google.handleRedirect(state);
   if (r) {
     save(true);
@@ -821,9 +1170,19 @@ async function freshen() {
   }
   render();
   if (r?.ok) {
-    await cloudSync(true);
+    if (google.hasToken(state)) await cloudSync(true);
     if (google.healthOk(state)) fbSync(!r.healthRequested);
+    if (!r.healthRequested) await freshen();
   } else await freshen();
 })();
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && google.signedIn(state)) freshen(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') freshen(); });
+// while the app is open: cloud sync every minute, Fitbit + Strava every 15 min
+setInterval(() => {
+  if (document.visibilityState !== 'visible' || tracker) return;
+  if (google.hasToken(state)) {
+    if (state.dirtyAt || Date.now() - (state.auth.syncedAt || 0) > 60e3) cloudSync(true);
+    if (google.healthOk(state) && fitbitStale()) fbSync(true);
+  }
+  if (strava.connected(state) && stravaStale()) stravaSync(true);
+}, 60e3);
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});

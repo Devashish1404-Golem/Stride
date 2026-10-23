@@ -13,11 +13,11 @@ const API = 'https://health.googleapis.com/v4/users/me/dataTypes';
 async function get(state, path, params = {}) {
   const fb = state.fitbit;
   const url = `${API}/${path}?${new URLSearchParams(params)}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${state.auth.token}` } });
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${state.auth.healthToken}` } });
   const text = await res.text();
   let body; try { body = JSON.parse(text); } catch { body = text; }
   fb.lastRaw = { path, status: res.status, body: typeof body === 'string' ? body.slice(0, 4000) : body };
-  if (res.status === 401) { state.auth.token = null; throw new Error('Google session expired.'); }
+  if (res.status === 401) { state.auth.healthToken = null; throw new Error('Fitbit session expired. It will reconnect automatically.'); }
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status} ${body?.error?.message || ''}`);
   return body;
 }

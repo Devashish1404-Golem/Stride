@@ -1,7 +1,7 @@
 // Offline support: network-first for app files (so updates arrive), cache as fallback.
-const CACHE = 'stride-v3';
+const CACHE = 'stride-v4';
 const ASSETS = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'js/app.js', 'js/util.js', 'js/store.js', 'js/vdot.js',
-  'js/plan.js', 'js/gym.js', 'js/coach.js', 'js/health.js', 'js/tracker.js', 'js/config.js', 'js/google.js', 'js/sync.js', 'icons/icon-180.png', 'icons/icon-192.png'];
+  'js/plan.js', 'js/gym.js', 'js/coach.js', 'js/health.js', 'js/tracker.js', 'js/config.js', 'js/google.js', 'js/sync.js', 'js/units.js', 'js/strain.js', 'js/route.js', 'js/strava.js', 'js/spotify.js', 'icons/icon-180.png', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

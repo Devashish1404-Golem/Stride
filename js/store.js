@@ -14,13 +14,24 @@ const defaults = () => ({
   planAt: 0,       // when profile/plan last changed (sync picks the newest)
   dirtyAt: 0,      // unsynced local change
   auth: null,      // Google account: { email, name, picture, token, expiresAt, healthGranted, ... }
+  settings: { units: 'km', tiles: DEFAULT_TILES, voice: {} },
+  settingsAt: 0,
+  integrations: { strava: { autoPush: true }, spotify: { clientId: '' } },
+  integrationsAt: 0,
 });
+
+export const DEFAULT_TILES = ['hrv', 'rhr', 'vo2max', 'sleep', 'resp', 'spo2', 'skinTemp', 'steps'];
 
 function load() {
   try {
     const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
     const d = defaults();
-    return { ...d, ...raw, fitbit: { ...d.fitbit, ...(raw.fitbit || {}) } };
+    return {
+      ...d, ...raw,
+      fitbit: { ...d.fitbit, ...(raw.fitbit || {}) },
+      settings: { ...d.settings, ...(raw.settings || {}) },
+      integrations: { strava: { ...d.integrations.strava, ...(raw.integrations?.strava || {}) }, spotify: { ...d.integrations.spotify, ...(raw.integrations?.spotify || {}) } },
+    };
   } catch {
     return defaults();
   }

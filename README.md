@@ -98,9 +98,45 @@ or something doesn't parse:
 - As a fallback, request your Fitbit data export (Fitbit app → profile → *Manage data → Export your data*,
   or Google Takeout) and import the `exercise-*.json` files, or any `.gpx`/`.tcx` file, under **Settings → Import runs**.
 
+## 5. Strava (push runs + map outlines)
+
+1. Go to https://www.strava.com/settings/api and create an app.
+   - **Website:** your app URL.
+   - **Authorization Callback Domain:** `<you>.github.io` (domain only, no `https://`).
+2. In **Stride → Settings → Strava**, paste the **Client ID** and **Client Secret**, then tap **Connect with Strava** and approve.
+
+What you get:
+- Runs you record in Stride upload automatically. GPS runs include the map, and the description lists the workout and your songs.
+- Runs from your watch or Strava are imported, and their route outline shows in Stride.
+- Strava syncs every 15 minutes while the app is open.
+
+Strava's token exchange needs the Client Secret, and there's no way around that without a server. Stride keeps it only on your
+devices and in your private Drive sync file, never in this repo.
+
+## 6. Spotify (songs on each run)
+
+1. Go to https://developer.spotify.com/dashboard → **Create app**.
+   - Select **Web API**.
+   - Redirect URI: `https://<you>.github.io/Stride/` (exactly as shown in Stride's Settings).
+2. In the app's **User Management**, add the email of your Spotify account.
+3. Paste the **Client ID** in **Stride → Settings → Spotify** and tap **Connect**. No secret is needed (PKCE).
+
+What you get: a now-playing card during guided runs, and the songs played during each run (from Spotify's
+last-50-plays history) saved on the run. They're also added to the Strava description.
+
+## Voice coach
+
+During guided runs Stride speaks over your music:
+- each workout step with its target pace
+- your distance, total time, split pace and average pace every 0.5 / 1 / 2 / 5 km or miles (you choose)
+- "100 metres to go" and "10 seconds" countdowns on reps
+- "Ease off" / "Pick it up" alerts when you've been off target pace for 20 seconds
+
+**Tap the stats** on the run screen at any time to hear everything read out. Configure it in **Settings → Voice coach**.
+
 ## Limits worth knowing
 
-- iOS pauses GPS for web apps when the screen locks. Stride holds a screen wake-lock during guided
+- iOS pauses GPS, voice cues and timers for web apps when the screen locks. Stride holds a screen wake-lock during guided
   runs, so keep the app open. For locked-screen tracking, record with your Fitbit and let it sync.
 - Data lives on the device. Use **Settings → Backup → Export** regularly.
 

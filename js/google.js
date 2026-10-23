@@ -2,6 +2,9 @@
 // You stay signed in until you sign out: we remember your account, and when the 1-hour access
 // token runs out we fetch a new one with a silent redirect (prompt=none) that needs no tapping
 // as long as your Google session in this browser/app is alive.
+//
+// Two tokens: the Google Health API rejects tokens that carry any non-health scope
+// (403 "Request contains disallowed OAuth scope(s)"), so Fitbit data uses its own health-only token.
 
 import { GOOGLE_CLIENT_ID } from './config.js';
 
@@ -19,19 +22,18 @@ export const clientId = () => GOOGLE_CLIENT_ID || localStorage.getItem('stride.c
 export const setClientId = (id) => localStorage.setItem('stride.clientId', id.trim());
 export const signedIn = (s) => !!s.auth?.email;
 export const hasToken = (s) => !!(s.auth?.token && s.auth.expiresAt > Date.now());
-export const healthOk = (s) => hasToken(s) && !!s.auth.healthGranted;
+export const healthOk = (s) => !!(s.auth?.healthToken && s.auth.healthExpiresAt > Date.now() && s.auth.healthGranted);
 
 export function authorize(s, { health = false, silent = false } = {}) {
   const id = clientId();
   if (!id) throw new Error('Google Client ID missing');
   const st = Math.random().toString(36).slice(2);
   localStorage.setItem('stride.oauthState', JSON.stringify({ st, health, silent }));
-  if (silent) localStorage.setItem('stride.silentAt', String(Date.now()));
-  const wantHealth = health || s.auth?.healthWanted;
+  if (silent) localStorage.setItem(`stride.silentAt.${health ? 'h' : 'b'}`, String(Date.now()));
   const q = new URLSearchParams({
     client_id: id, redirect_uri: redirectUri(), response_type: 'token', state: st,
-    scope: [...BASE_SCOPES, ...(wantHealth ? HEALTH_SCOPES : [])].join(' '),
-    include_granted_scopes: 'true',
+    scope: (health ? HEALTH_SCOPES : BASE_SCOPES).join(' '),
+    include_granted_scopes: 'false',
   });
   if (s.auth?.email) q.set('login_hint', s.auth.email);
   if (silent) q.set('prompt', 'none');
@@ -52,15 +54,13 @@ export async function handleRedirect(s) {
     return { error: h.get('error') === 'access_denied' ? 'Sign-in cancelled.' : `Google sign-in failed: ${h.get('error')}` };
   }
   const granted = (h.get('scope') || '').split(' ');
+  const expires = Date.now() + (Number(h.get('expires_in')) || 3600) * 1000 - 60000;
+  if (saved.health) {
+    s.auth = { ...(s.auth || {}), healthToken: h.get('access_token'), healthExpiresAt: expires, healthGranted: HEALTH_SCOPES.every((x) => granted.includes(x)), healthWanted: true, needsTap: false };
+    return { ok: true, healthRequested: true };
+  }
   const firstSignIn = !s.auth?.email;
-  s.auth = {
-    ...(s.auth || {}),
-    token: h.get('access_token'),
-    expiresAt: Date.now() + (Number(h.get('expires_in')) || 3600) * 1000 - 60000,
-    healthGranted: HEALTH_SCOPES.every((x) => granted.includes(x)),
-    needsTap: false,
-  };
-  if (saved.health) s.auth.healthWanted = true;
+  s.auth = { ...(s.auth || {}), token: h.get('access_token'), expiresAt: expires, needsTap: false };
   if (firstSignIn || !s.auth.name) {
     try {
       const u = await (await gfetch(s, 'https://www.googleapis.com/oauth2/v3/userinfo')).json();
@@ -70,13 +70,14 @@ export async function handleRedirect(s) {
   return { ok: true, firstSignIn, healthRequested: !!saved.health };
 }
 
-// If signed in but the token expired, bounce through Google silently to get a fresh one.
-// Returns true when a redirect has started.
-export function maybeSilentRefresh(s, needed) {
-  if (!signedIn(s) || hasToken(s) || !needed || s.auth.needsTap || !navigator.onLine) return false;
-  if (Date.now() - Number(localStorage.getItem('stride.silentAt') || 0) < SILENT_GAP_MS) return false;
-  authorize(s, { silent: true });
-  return true;
+// If signed in but a token expired, bounce through Google silently to get a fresh one.
+// needs = { base, health }. Returns true when a redirect has started.
+export function maybeSilentRefresh(s, needs) {
+  if (!signedIn(s) || s.auth.needsTap || !navigator.onLine) return false;
+  const recent = (k) => Date.now() - Number(localStorage.getItem(`stride.silentAt.${k}`) || 0) < SILENT_GAP_MS;
+  if (needs.base && !hasToken(s) && !recent('b')) { authorize(s, { silent: true }); return true; }
+  if (needs.health && s.auth.healthWanted && !healthOk(s) && !recent('h')) { authorize(s, { silent: true, health: true }); return true; }
+  return false;
 }
 
 export function signOut(s) {

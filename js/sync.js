@@ -13,6 +13,8 @@ export function snapshot(s) {
     profile: s.profile, plan: s.plan, planAt: s.planAt || 0,
     runs: s.runs, gymLogs: s.gymLogs, completions: s.completions,
     dismissed: s.dismissed, deleted: s.deleted || {},
+    settings: s.settings, settingsAt: s.settingsAt || 0,
+    integrations: s.integrations, integrationsAt: s.integrationsAt || 0,
     fitbit: { rhr: s.fitbit.rhr, sleep: s.fitbit.sleep, metrics: s.fitbit.metrics || {}, lastSync: s.fitbit.lastSync },
   };
 }
@@ -52,6 +54,8 @@ export function merge(s, r) {
     s.profile = r.profile; s.plan = r.plan; s.planAt = r.planAt;
   }
   s.dismissed = { ...(r.dismissed || {}), ...(s.dismissed || {}) };
+  if ((r.settingsAt || 0) > (s.settingsAt || 0) && r.settings) { s.settings = { ...s.settings, ...r.settings }; s.settingsAt = r.settingsAt; }
+  if ((r.integrationsAt || 0) > (s.integrationsAt || 0) && r.integrations) { s.integrations = r.integrations; s.integrationsAt = r.integrationsAt; }
 
   const f = r.fitbit || {};
   s.fitbit.rhr = { ...(f.rhr || {}), ...s.fitbit.rhr };

@@ -21,22 +21,21 @@ export function matchRun(s, run) {
 }
 
 // Latest value (today or yesterday) and its 14-day baseline for a date-keyed series.
-export function latestVsBaseline(series = {}) {
-  const t = today();
+export function latestVsBaseline(series = {}, t = today()) {
   const latest = series[t] ?? series[addDays(t, -1)];
   const base = [];
   for (let i = 2; i <= 15; i++) { const v = series[addDays(t, -i)]; if (v != null) base.push(v); }
   return { latest, baseline: base.length >= 4 ? sum(base) / base.length : null };
 }
 
-export function readiness(s) {
+export function readiness(s, date = today()) {
   const m = s.fitbit.metrics || {};
-  const rhr = latestVsBaseline(s.fitbit.rhr);
-  const hrv = latestVsBaseline(m.hrv);
-  const resp = latestVsBaseline(m.resp);
-  const sleepMin = s.fitbit.sleep[today()];
-  const spo2 = latestVsBaseline(m.spo2).latest;
-  const skin = latestVsBaseline(m.skinTemp).latest;
+  const rhr = latestVsBaseline(s.fitbit.rhr, date);
+  const hrv = latestVsBaseline(m.hrv, date);
+  const resp = latestVsBaseline(m.resp, date);
+  const sleepMin = s.fitbit.sleep[date];
+  const spo2 = latestVsBaseline(m.spo2, date).latest;
+  const skin = latestVsBaseline(m.skinTemp, date).latest;
   if (!rhr.latest && !sleepMin && !hrv.latest) return null;
   let score = 75;
   const notes = [];
@@ -57,7 +56,7 @@ export function readiness(s) {
   if (resp.latest && resp.baseline && resp.latest - resp.baseline >= 1.5) { score -= 8; notes.push('Breathing rate elevated'); }
   if (skin != null && skin >= 0.8) { score -= 10; notes.push(`Skin temp +${skin}°C, possibly getting ill`); }
   if (spo2 && spo2 < 93) { score -= 8; notes.push(`SpO₂ low (${spo2}%)`); }
-  const acute = runKmBetween(s.runs, addDays(today(), -3), addDays(today(), -1));
+  const acute = runKmBetween(s.runs, addDays(date, -3), addDays(date, -1));
   score -= Math.max(0, acute - 25) * 0.6;
   score = Math.round(Math.max(5, Math.min(100, score)));
   return { score, rhr: rhr.latest, sleepMin, hrv: hrv.latest, notes, label: score >= 70 ? 'Ready to train' : score >= 50 ? 'Train with care' : 'Prioritise recovery' };
