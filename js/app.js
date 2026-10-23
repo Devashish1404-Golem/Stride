@@ -1,5 +1,7 @@
 import { $, $$, esc, today, addDays, fmtDate, fmtPace, fmtDur, parseDur, fmtKm, daysBetween, mondayOf, dow, DOW, DOW_LONG, round1, sum, uid, clamp } from './util.js';
-import { state, save, replaceState, resetState } from './store.js';
+import { state, save, replaceState, resetState, tombstone, onChange } from './store.js';
+import * as google from './google.js';
+import { syncNow } from './sync.js';
 import { vdotFrom, vdotFromEasyPace, predictTime, DISTANCES, ZONES } from './vdot.js';
 import { generatePlan, mergePlans, allWorkouts, weekOf, swapToEasy } from './plan.js';
 import { EXERCISES, sessionByKey, allSessions, suggestLoad } from './gym.js';
@@ -17,6 +19,10 @@ let editingProfile = false;
 // ---------------- helpers ----------------
 const TYPE_COLOR = { easy: 'var(--z-easy)', long: 'var(--z-long)', intervals: 'var(--z-i)', tempo: 'var(--z-t)', mp: 'var(--z-m)', hills: 'var(--z-r)', race: 'var(--accent)', gym: 'var(--gym)' };
 const icon = (name) => `<svg class="ic" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+const GOOGLE_G = '<svg class="ic" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>';
+const avatar = () => state.auth?.picture
+  ? `<img class="avatar" src="${esc(state.auth.picture)}" alt="" referrerpolicy="no-referrer">`
+  : `<span class="avatar">${esc((state.auth?.name || state.auth?.email || '?')[0].toUpperCase())}</span>`;
 
 function toast(msg, ms = 2600) {
   const t = document.createElement('div');
@@ -108,6 +114,13 @@ function renderOnboarding() {
     <div class="brand">${icon('logo')} <span>Stride</span></div>
     <h1>${editingProfile ? 'Edit your plan' : 'Let’s build your plan'}</h1>
     <p class="muted">${editingProfile ? 'Changes rebuild everything from today on. Past workouts and logs are kept.' : 'A few questions and you get a periodised running and strength plan with paces calibrated to you.'}</p>
+    ${!editingProfile ? (google.signedIn(state)
+      ? `<section class="card account mini">${avatar()}<div class="grow"><b>Signed in as ${esc(state.auth.email)}</b><div class="muted small">${syncing ? 'Checking your account for a saved plan…' : 'No saved plan on your account yet. Create one below and it syncs to all your devices.'}</div></div></section>`
+      : `<section class="card signin">
+          <button class="btn gsi block" data-act="signIn">${GOOGLE_G} Sign in with Google</button>
+          <p class="muted small center">Stay signed in and sync your plan, runs and gym logs across all your devices. Already using Stride? Sign in to restore everything.</p>
+          <div class="or"><span>or set up without an account</span></div>
+        </section>`) : ''}
     <form id="onb">
       <section class="card">
         <h3>Your race</h3>
@@ -178,6 +191,7 @@ function onboardSubmit(e) {
 
 function rebuildPlan() {
   state.plan = mergePlans(state.plan, generatePlan(state.profile));
+  state.planAt = Date.now();
   save();
 }
 
@@ -354,13 +368,38 @@ function viewProgress() {
     }).join('') : '<p class="muted">No runs yet.</p>'}`;
 }
 
+function syncLabel() {
+  const a = state.auth;
+  if (!a?.syncedAt) return 'Not synced yet';
+  const min = Math.round((Date.now() - a.syncedAt) / 60000);
+  return `Synced ${min < 1 ? 'just now' : min < 60 ? `${min} min ago` : new Date(a.syncedAt).toLocaleString()}`;
+}
+
+function accountCard() {
+  if (!google.signedIn(state)) {
+    return `<section class="card signin"><h3>Account</h3>
+      <p class="muted small">Sign in with Google to stay logged in and sync your plan, runs, gym logs and Fitbit data across all your devices. Data is saved in a hidden Stride folder in your own Google Drive.</p>
+      <button class="btn gsi block" data-act="signIn">${GOOGLE_G} Sign in with Google</button></section>`;
+  }
+  const a = state.auth;
+  return `<section class="card"><div class="account">${avatar()}<div class="grow"><b>${esc(a.name || a.email)}</b><div class="muted small">${esc(a.email)}</div>
+      <div class="muted small">${a.needsTap ? '<span class="warnt">Session paused, tap Reconnect</span>' : esc(syncLabel())}</div></div></div>
+    <div class="row gap">
+      ${a.needsTap || !google.hasToken(state) ? `<button class="btn primary" data-act="signIn">Reconnect</button>` : `<button class="btn" data-act="syncCloud">${icon('sync')} Sync now</button>`}
+      <button class="btn ghost" data-act="signOut">Sign out</button>
+    </div>
+    ${state.syncError ? `<div class="err">${esc(state.syncError)}</div>` : ''}</section>`;
+}
+
 function viewSettings() {
   const fb = state.fitbit;
   const pr = state.profile;
-  const connected = health.isConnected(fb);
+  const connected = google.healthOk(state);
+  const wanted = state.auth?.healthWanted;
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   return `<header class="top"><div><div class="eyebrow">Stride</div><h1>Settings</h1></div></header>
-    ${!standalone ? `<section class="card hero-sub">${icon('share')} <div><b>Install on your iPhone</b><div class="muted small">In Safari tap Share → <b>Add to Home Screen</b>. It then opens full-screen like a native app. Connect Fitbit from inside the installed app, because iOS keeps its storage separate from Safari.</div></div></section>` : ''}
+    ${!standalone ? `<section class="card hero-sub">${icon('share')} <div><b>Install on your iPhone</b><div class="muted small">In Safari tap Share → <b>Add to Home Screen</b>. It then opens full-screen like a native app. Sign in from inside the installed app, because iOS keeps its storage separate from Safari.</div></div></section>` : ''}
+    ${accountCard()}
     <section class="card">
       <h3>Plan</h3>
       <p class="muted small">${DISTANCES[pr.goal].label} on ${fmtDate(pr.raceDate, { day: 'numeric', month: 'long', year: 'numeric' })} · ${pr.runDays.length} runs/week · ${pr.gymDays.length} gym/week · volume ×${pr.volumeScale ?? 1}</p>
@@ -368,18 +407,22 @@ function viewSettings() {
     </section>
     <section class="card">
       <h3>Fitbit via Google Health</h3>
-      <p class="muted small">Pulls runs (distance, time, avg/max heart rate, calories), VO₂ max, HRV, resting heart rate, sleep, SpO₂, breathing rate, skin temperature, steps and weight from your Fitbit through Google’s Health API. The old Fitbit Web API shuts down on 30 Oct 2026, so this uses Google’s replacement. See README for the one-time Google Cloud setup.</p>
-      <label>Google OAuth Client ID<input id="clientId" value="${esc(fb.clientId)}" placeholder="1234-abc.apps.googleusercontent.com" autocapitalize="off" spellcheck="false"></label>
-      <div class="muted small">Authorised redirect URI to register: <code>${esc(health.redirectUri())}</code></div>
+      <p class="muted small">Pulls runs (distance, time, avg/max heart rate, calories), VO₂ max, HRV, resting heart rate, sleep, SpO₂, breathing rate, skin temperature, steps and weight from your Fitbit through Google’s Health API.</p>
       <div class="row gap">
-        ${connected ? `<button class="btn primary" data-act="fbSync">${icon('sync')} Sync now</button><button class="btn ghost" data-act="fbDisconnect">Disconnect</button>`
-          : `<button class="btn primary" data-act="fbConnect">Connect</button>`}
+        ${!google.signedIn(state) ? '<span class="muted small">Sign in with Google first.</span>'
+          : connected ? `<button class="btn primary" data-act="fbSync">${icon('sync')} Sync Fitbit now</button>`
+          : `<button class="btn primary" data-act="fbConnect">${wanted ? 'Reconnect Fitbit' : 'Connect Fitbit'}</button>`}
       </div>
       ${fb.lastSync ? `<div class="muted small">Data received: ${['Runs', Object.keys(fb.rhr).length && 'Resting HR', Object.keys(fb.sleep).length && 'Sleep', ...Object.entries(fb.metrics || {}).filter(([, v]) => Object.keys(v).length).map(([k]) => health.METRICS[k]?.label)].filter(Boolean).join(' · ')}</div>` : ''}
-      <div class="muted small">${fb.lastSync ? `Last sync ${new Date(fb.lastSync).toLocaleString()}` : 'Never synced'}${fb.tokens && !connected ? ' · session expired, reconnect' : ''}</div>
+      <div class="muted small">${fb.lastSync ? `Last Fitbit sync ${new Date(fb.lastSync).toLocaleString()}` : 'Never synced'}</div>
       ${fb.error ? `<div class="err">${esc(fb.error)}</div>` : ''}
       ${fb.lastRaw ? `<details><summary class="small">Show last raw response</summary><pre>${esc(JSON.stringify(fb.lastRaw, null, 1).slice(0, 3000))}</pre></details>` : ''}
     </section>
+    <details class="card"><summary class="small muted">Google setup (advanced)</summary>
+      <label>Google OAuth Client ID<input id="clientId" value="${esc(google.clientId())}" placeholder="1234-abc.apps.googleusercontent.com" autocapitalize="off" spellcheck="false"></label>
+      <button class="btn sm" data-act="saveClientId">Save</button>
+      <div class="muted small">Authorised redirect URI: <code>${esc(google.redirectUri())}</code></div>
+    </details>
     <section class="card">
       <h3>Import runs</h3>
       <p class="muted small">GPX or TCX files from any watch or app, or files from your Fitbit / Google Takeout export: <code>exercise-*.json</code>, <code>demographic_vo2_max-*.json</code>, <code>resting_heart_rate-*.json</code>, <code>sleep-*.json</code>, <code>weight-*.json</code>. Runs on a planned day are matched to the plan automatically.</p>
@@ -453,7 +496,7 @@ function openLogRun(id) {
 }
 
 function addRun(run, workout) {
-  if (workout) { run.workoutId = workout.id; state.completions[workout.id] = { status: 'done', runId: run.id }; }
+  if (workout) { run.workoutId = workout.id; state.completions[workout.id] = { status: 'done', runId: run.id, at: Date.now() }; }
   else matchRun(state, run);
   state.runs.push(run);
   state.runs.sort((a, b) => a.date.localeCompare(b.date));
@@ -495,11 +538,11 @@ function openGym(workout, sessionKey) {
       sets: Array.from({ length: it.sets }, (_, si) => ({ kg: Number(f.get(`kg-${k}-${si}`)) || 0, reps: Number(f.get(`reps-${k}-${si}`)) || 0, done: !!f.get(`done-${k}-${si}`) })),
     }));
     if (!entries.some((en) => en.sets.some((s) => s.done))) return toast('Tick off the sets you completed');
-    const log = { id: prev?.id || uid(), date: workout?.date || today(), workoutId: workout?.id, sessionKey: sess.sessionKey, title: sess.title, entries };
+    const log = { at: Date.now(), id: prev?.id || uid(), date: workout?.date || today(), workoutId: workout?.id, sessionKey: sess.sessionKey, title: sess.title, entries };
     state.gymLogs = state.gymLogs.filter((l) => l.id !== log.id);
     state.gymLogs.push(log);
     state.gymLogs.sort((a, b) => a.date.localeCompare(b.date));
-    if (workout) state.completions[workout.id] = { status: 'done', logId: log.id };
+    if (workout) state.completions[workout.id] = { status: 'done', logId: log.id, at: Date.now() };
     save(); closeSheet(); render();
     toast('Session saved 💪');
   });
@@ -612,6 +655,7 @@ async function fbSync(quiet = false) {
     const rep = await health.sync(state, (r) => matchRun(state, r));
     state.fitbit.error = rep.errors.length ? rep.errors.join(' · ') : null;
     save(); render();
+    cloudSync(true);
     const extra = Object.keys(rep.metrics).map((k) => health.METRICS[k].label).join(', ');
     if (!quiet) toast(`Synced ${rep.runs} new run(s), ${rep.rhr} HR days, ${rep.sleep} nights${extra ? `, plus ${extra}` : ''}`);
   } catch (e) {
@@ -628,15 +672,16 @@ const actions = {
   closeSheet,
   logRun: (d) => openLogRun(d.id),
   startRun: (d) => startRun(d.id),
-  skip: (d) => { state.completions[d.id] = { status: 'skipped' }; save(); closeSheet(); render(); },
+  skip: (d) => { state.completions[d.id] = { status: 'skipped', at: Date.now() }; save(); closeSheet(); render(); },
   unmark: (d) => {
     const c = state.completions[d.id];
     if (c?.runId) { const r = state.runs.find((x) => x.id === c.runId); if (r) r.workoutId = null; }
-    delete state.completions[d.id]; save(); closeSheet(); render();
+    delete state.completions[d.id]; tombstone(`c:${d.id}`); save(); closeSheet(); render();
   },
   swapEasy: (d) => {
     const p = currentPaces(state);
     for (const wk of state.plan.weeks) wk.workouts = wk.workouts.map((w) => (w.id === d.id ? swapToEasy(w, p) : w));
+    state.planAt = Date.now();
     save(); closeSheet(); render(); toast('Swapped to an easy run');
   },
   dismiss: (d) => { state.dismissed[d.id] = today(); save(); render(); },
@@ -654,25 +699,37 @@ const actions = {
   deleteRun: (d) => {
     if (!confirm('Delete this run?')) return;
     state.runs = state.runs.filter((r) => r.id !== d.id);
-    for (const [k, c] of Object.entries(state.completions)) if (c.runId === d.id) delete state.completions[k];
+    tombstone(`r:${d.id}`);
+    for (const [k, c] of Object.entries(state.completions)) if (c.runId === d.id) { delete state.completions[k]; tombstone(`c:${k}`); }
     save(); render();
   },
   deleteGym: (d) => {
     if (!confirm('Delete this session log?')) return;
     state.gymLogs = state.gymLogs.filter((l) => l.id !== d.id);
-    for (const [k, c] of Object.entries(state.completions)) if (c.logId === d.id) delete state.completions[k];
+    tombstone(`g:${d.id}`);
+    for (const [k, c] of Object.entries(state.completions)) if (c.logId === d.id) { delete state.completions[k]; tombstone(`c:${k}`); }
     save(); render();
   },
   editProfile: () => { editingProfile = true; render(); window.scrollTo(0, 0); },
   cancelEdit: () => { editingProfile = false; render(); },
-  fbConnect: () => {
-    state.fitbit.clientId = $('#clientId').value.trim(); save();
-    try { health.connect(state.fitbit); } catch (e) { toast(e.message); }
+  signIn: () => {
+    if (!google.clientId()) {
+      const id = prompt('One-time setup: paste your Google OAuth Client ID (see README)');
+      if (!id) return;
+      google.setClientId(id);
+    }
+    try { google.authorize(state); } catch (e) { toast(e.message); }
   },
+  signOut: () => {
+    if (!confirm('Sign out? Your data stays on this device and in your Google account.')) return;
+    google.signOut(state); save(true); render(); toast('Signed out');
+  },
+  saveClientId: () => { google.setClientId($('#clientId').value); toast('Client ID saved'); },
+  syncCloud: () => cloudSync(),
+  fbConnect: () => { try { google.authorize(state, { health: true }); } catch (e) { toast(e.message); } },
   fbSync: () => fbSync(),
-  fbDisconnect: () => { health.disconnect(state.fitbit); save(); render(); },
   exportData: () => {
-    const blob = new Blob([JSON.stringify({ ...state, fitbit: { ...state.fitbit, tokens: null, lastRaw: null } }, null, 1)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ ...state, auth: null, fitbit: { ...state.fitbit, tokens: null, lastRaw: null } }, null, 1)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `stride-backup-${today()}.json`;
@@ -706,8 +763,67 @@ document.addEventListener('change', async (e) => {
   }
 });
 
+// ---------------- cloud sync ----------------
+let syncing = null;
+async function cloudSync(quiet = false) {
+  if (!google.hasToken(state)) return;
+  if (syncing) return syncing;
+  syncing = (async () => {
+    try {
+      const { restored } = await syncNow(state);
+      state.syncError = null;
+      save(true);
+      if (restored) { editingProfile = false; tab = 'today'; toast(`Welcome back${state.auth.name ? `, ${state.auth.name}` : ''}! Plan restored`); }
+      else if (!quiet) toast('Synced');
+      render();
+    } catch (e) {
+      state.syncError = /drive/i.test(e.message) || e.status === 403 ? `Sync failed: ${e.message}. Is the Google Drive API enabled in your Google Cloud project?` : `Sync failed: ${e.message}`;
+      save(true); render();
+      if (!quiet) toast(state.syncError);
+    } finally { syncing = null; }
+  })();
+  return syncing;
+}
+
+// push local changes a few seconds after they happen
+let pushTimer;
+onChange(() => {
+  if (!google.hasToken(state)) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => cloudSync(true), 4000);
+});
+
+const fitbitStale = () => !state.fitbit.lastSync || Date.now() - Date.parse(state.fitbit.lastSync) > 3 * 3600e3;
+
+async function freshen() {
+  if (tracker) return; // never redirect away mid-run
+  if (google.hasToken(state)) {
+    if (Date.now() - (state.auth.syncedAt || 0) > 2 * 60e3 || state.dirtyAt) await cloudSync(true);
+    if (google.healthOk(state) && fitbitStale()) fbSync(true);
+    return;
+  }
+  // token expired: silently refresh if there's something to sync
+  const needed = state.dirtyAt > (state.auth?.syncedAt || 0) || Date.now() - (state.auth?.syncedAt || 0) > 30 * 60e3 || (state.auth?.healthWanted && fitbitStale());
+  google.maybeSilentRefresh(state, needed);
+}
+
 // ---------------- boot ----------------
-if (health.handleRedirect(state.fitbit)) { save(); tab = 'settings'; if (health.isConnected(state.fitbit)) fbSync(); }
-render();
-if (health.isConnected(state.fitbit) && (!state.fitbit.lastSync || Date.now() - Date.parse(state.fitbit.lastSync) > 3 * 3600e3)) fbSync(true);
+(async () => {
+  const r = await google.handleRedirect(state);
+  if (r) {
+    save(true);
+    if (r.error) toast(r.error);
+    if (r.ok && r.firstSignIn) toast(`Signed in as ${state.auth.email}`);
+    if (r.ok && r.healthRequested) {
+      tab = 'settings';
+      if (!state.auth.healthGranted) state.fitbit.error = 'Google didn’t grant the Fitbit/Health permissions. Make sure all boxes are ticked, and that the Google Health API is enabled for your project.';
+    }
+  }
+  render();
+  if (r?.ok) {
+    await cloudSync(true);
+    if (google.healthOk(state)) fbSync(!r.healthRequested);
+  } else await freshen();
+})();
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && google.signedIn(state)) freshen(); });
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});

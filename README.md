@@ -53,22 +53,32 @@ Opening that URL from the iPhone over Wi-Fi is plain `http`, so GPS and Fitbit s
 iOS keeps the Home Screen app's storage separate from Safari's, so set up and connect Fitbit
 from inside the installed app.
 
-## 3. Connect Fitbit (Google Health API)
+## 3. Sign in with Google (sync across devices)
 
-Google is retiring the legacy Fitbit Web API (it switches off on **30 Oct 2026**). Fitbit data now
-comes through the **Google Health API**, which needs a one-time Google Cloud setup:
+**Sign in with Google** keeps you logged in until you sign out. It syncs your plan, runs, gym logs
+and Fitbit data across every device you sign in on. Data is stored in a hidden Stride-only
+folder in **your own Google Drive** (the app-data folder), so there's no server and no third party.
 
-1. Go to https://console.cloud.google.com, create a project, then open **APIs & Services → Library**
-   and enable **Google Health API**.
-2. Open **OAuth consent screen**:
-   - choose External, in Testing mode
-   - add your own Google account (the one your Fitbit uses) as a **test user**
-   - add the scopes `googlehealth.activity_and_fitness.readonly`,
-     `googlehealth.health_metrics_and_measurements.readonly` and `googlehealth.sleep.readonly`
-3. Open **Credentials → Create credentials → OAuth client ID → Web application**:
-   - Authorised JavaScript origin: `https://<your-username>.github.io`
-   - Authorised redirect URI: exactly what Stride shows under Settings, e.g. `https://<your-username>.github.io/stride/`
-4. Copy the Client ID into **Stride → Settings → Fitbit via Google Health**, then tap **Connect**.
+One-time Google Cloud setup (in the same project as your OAuth client):
+1. **APIs & Services → Library**: enable **Google Drive API**. Also enable **Google Health API** for Fitbit.
+2. **Google Auth Platform → Data Access → Add or remove scopes**, and add:
+   - `https://www.googleapis.com/auth/drive.appdata`
+   - the three `googlehealth.*.readonly` scopes (for Fitbit)
+3. **Audience**: keep it in *Testing*, and add your Gmail under **Test users**.
+4. **Clients → your Web client**:
+   - Authorised JavaScript origin: `https://<you>.github.io`
+   - Authorised redirect URI: `https://<you>.github.io/Stride/`
+5. Put the Client ID in `js/config.js` (`GOOGLE_CLIENT_ID = '...'`) so no device ever asks for it.
+   It's public by design, so it's safe to commit.
+
+Google's browser access tokens last one hour. When one expires, Stride gets a new one with a quick
+silent bounce through Google (no tapping), as long as you're still signed in to Google on that device.
+It never does this during a guided run.
+
+## 4. Connect Fitbit (Google Health API)
+
+After signing in, tap **Settings → Connect Fitbit** and tick all the permission boxes.
+The legacy Fitbit Web API switches off on **30 Oct 2026**; Stride uses its replacement, the Google Health API.
 
 Stride syncs the last 60 days of:
 - **Runs:** distance, time, avg/max heart rate, calories

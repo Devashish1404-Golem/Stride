@@ -1,64 +1,32 @@
 // Fitbit data via the Google Health API (v4), which replaces the legacy Fitbit Web API
-// (shut down 30 Oct 2026). Browser-only: Google OAuth 2.0 token flow, no backend, no client secret.
+// (shut down 30 Oct 2026). Uses the token from Google sign-in (google.js) with the health scopes added.
 //
 // The v4 response shapes are new, so parsing is deliberately defensive: it searches each data
 // point for start time / distance / duration / heart-rate fields rather than assuming exact names.
 // Settings → "Show last raw response" lets you inspect what came back.
 
 import { ymd, uid, addDays, today, haversine } from './util.js';
+import { healthOk } from './google.js';
 
-const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const API = 'https://health.googleapis.com/v4/users/me/dataTypes';
-const SCOPES = [
-  'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
-  'https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly',
-  'https://www.googleapis.com/auth/googlehealth.sleep.readonly',
-];
 
-export const redirectUri = () => location.origin + location.pathname;
-export const isConnected = (fb) => !!(fb.tokens?.access_token && fb.tokens.expires_at > Date.now());
-
-export function connect(fb) {
-  if (!fb.clientId) throw new Error('Add your Google OAuth Client ID first.');
-  const st = Math.random().toString(36).slice(2);
-  localStorage.setItem('stride.oauthState', st);
-  const q = new URLSearchParams({
-    client_id: fb.clientId, redirect_uri: redirectUri(), response_type: 'token',
-    scope: SCOPES.join(' '), state: st, prompt: 'consent',
-  });
-  location.href = `${AUTH_URL}?${q}`;
-}
-
-// Call on startup: picks up #access_token=… after Google redirects back.
-export function handleRedirect(fb) {
-  if (!location.hash.includes('access_token') && !location.hash.includes('error=')) return false;
-  const h = new URLSearchParams(location.hash.slice(1));
-  history.replaceState(null, '', location.pathname + location.search);
-  if (h.get('state') !== localStorage.getItem('stride.oauthState')) { fb.error = 'Sign-in state mismatch. Try connecting again.'; return true; }
-  if (h.get('error')) { fb.error = `Google sign-in failed: ${h.get('error')}`; return true; }
-  fb.tokens = { access_token: h.get('access_token'), expires_at: Date.now() + (Number(h.get('expires_in')) || 3600) * 1000 - 60000 };
-  fb.error = null;
-  return true;
-}
-
-export function disconnect(fb) { fb.tokens = null; }
-
-async function get(fb, path, params = {}) {
+async function get(state, path, params = {}) {
+  const fb = state.fitbit;
   const url = `${API}/${path}?${new URLSearchParams(params)}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${fb.tokens.access_token}` } });
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${state.auth.token}` } });
   const text = await res.text();
   let body; try { body = JSON.parse(text); } catch { body = text; }
   fb.lastRaw = { path, status: res.status, body: typeof body === 'string' ? body.slice(0, 4000) : body };
-  if (res.status === 401) { fb.tokens = null; throw new Error('Google session expired. Tap Connect again.'); }
+  if (res.status === 401) { state.auth.token = null; throw new Error('Google session expired.'); }
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status} ${body?.error?.message || ''}`);
   return body;
 }
 
-async function listAll(fb, type, maxPages = 5) {
+async function listAll(state, type, maxPages = 5) {
   const points = [];
   let pageToken;
   for (let i = 0; i < maxPages; i++) {
-    const body = await get(fb, `${type}/dataPoints`, { pageSize: 200, ...(pageToken ? { pageToken } : {}) });
+    const body = await get(state, `${type}/dataPoints`, { pageSize: 200, ...(pageToken ? { pageToken } : {}) });
     points.push(...(body.dataPoints || body.points || []));
     pageToken = body.nextPageToken;
     if (!pageToken) break;
@@ -147,13 +115,13 @@ function parseSleep(p) {
 
 export async function sync(state, onRun) {
   const fb = state.fitbit;
-  if (!isConnected(fb)) throw new Error('Not connected.');
+  if (!healthOk(state)) throw new Error('Connect Fitbit first.');
   const since = addDays(today(), -60);
   const report = { runs: 0, rhr: 0, sleep: 0, metrics: {}, errors: [] };
 
   try {
     const known = new Set(state.runs.map((r) => r.extId).filter(Boolean));
-    for (const p of await listAll(fb, 'exercise')) {
+    for (const p of await listAll(state, 'exercise')) {
       const r = parseExercise(p);
       if (!r || r.date < since || known.has(r.extId)) continue;
       // de-dupe against GPS runs recorded in this app at the same time
@@ -163,14 +131,14 @@ export async function sync(state, onRun) {
   } catch (e) { report.errors.push(`Runs: ${e.message}`); }
 
   try {
-    for (const p of await listAll(fb, 'daily-resting-heart-rate', 2)) {
+    for (const p of await listAll(state, 'daily-resting-heart-rate', 2)) {
       const d = parseDaily(p, /beatsPerMinute|bpm|restingHeartRate|value/i);
       if (d && d.date >= since) { state.fitbit.rhr[d.date] = Math.round(d.v); report.rhr++; }
     }
   } catch (e) { report.errors.push(`Resting HR: ${e.message}`); }
 
   try {
-    for (const p of await listAll(fb, 'sleep', 2)) {
+    for (const p of await listAll(state, 'sleep', 2)) {
       const s = parseSleep(p);
       if (s && s.date >= since) { state.fitbit.sleep[s.date] = Math.max(state.fitbit.sleep[s.date] || 0, s.min); report.sleep++; }
     }
@@ -179,7 +147,7 @@ export async function sync(state, onRun) {
   fb.metrics ||= {};
   for (const [key, m] of Object.entries(METRICS)) {
     try {
-      for (const p of await listAll(fb, m.type, 2)) {
+      for (const p of await listAll(state, m.type, 2)) {
         const d = parseDaily(p, m.re);
         if (!d || d.date < since) continue;
         let v = d.v;

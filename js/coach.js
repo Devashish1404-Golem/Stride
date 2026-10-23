@@ -16,7 +16,7 @@ export function matchRun(s, run) {
   const w = allWorkouts(s.plan).find((x) => x.kind === 'run' && x.date === run.date && !s.completions[x.id]);
   if (w) {
     run.workoutId = w.id;
-    s.completions[w.id] = { status: 'done', runId: run.id };
+    s.completions[w.id] = { status: 'done', runId: run.id, at: Date.now() };
   }
 }
 

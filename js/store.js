@@ -10,6 +10,10 @@ const defaults = () => ({
   completions: {}, // workoutId -> { status: 'done' | 'skipped', runId?, logId? }
   fitbit: { clientId: '', tokens: null, lastSync: null, rhr: {}, sleep: {}, error: null },
   dismissed: {},   // insight id -> date dismissed
+  deleted: {},     // sync tombstones: 'r:<runId>' | 'g:<logId>' | 'c:<workoutId>' -> timestamp
+  planAt: 0,       // when profile/plan last changed (sync picks the newest)
+  dirtyAt: 0,      // unsynced local change
+  auth: null,      // Google account: { email, name, picture, token, expiresAt, healthGranted, ... }
 });
 
 function load() {
@@ -24,15 +28,24 @@ function load() {
 
 export const state = load();
 
-export function save() {
+const listeners = [];
+export const onChange = (fn) => listeners.push(fn);
+
+// quiet = internal bookkeeping (e.g. after a sync) that shouldn't trigger another sync
+export function save(quiet = false) {
+  if (!quiet) state.dirtyAt = Date.now();
   try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { console.warn('save failed', e); }
+  if (!quiet) listeners.forEach((fn) => fn());
 }
 
-export function replaceState(obj) {
+export const tombstone = (key) => { state.deleted[key] = Date.now(); };
+
+export function replaceState(obj, keepAuth = true) {
   const d = defaults();
+  const auth = keepAuth ? state.auth : null;
   for (const k of Object.keys(state)) delete state[k];
-  Object.assign(state, d, obj, { fitbit: { ...d.fitbit, ...(obj.fitbit || {}) } });
+  Object.assign(state, d, obj, { auth, planAt: Date.now(), fitbit: { ...d.fitbit, ...(obj.fitbit || {}) } });
   save();
 }
 
-export function resetState() { replaceState({}); }
+export function resetState() { replaceState({}, false); }

@@ -278,3 +278,15 @@ label.check input { width: 22px; height: 22px; margin: 0; -webkit-appearance: au
 .delta.down { color: var(--warn); }
 .spark { width: 120px; height: 38px; flex: none; }
 .spark path { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+
+/* account */
+.btn.gsi { background: #fff; color: #1f1f1f; border-color: #dadce0; font-weight: 600; }
+.btn.gsi .ic { width: 20px; height: 20px; }
+.account { display: flex; align-items: center; gap: 12px; }
+.account.mini { margin-top: 16px; }
+.avatar { width: 44px; height: 44px; border-radius: 50%; flex: none; display: grid; place-items: center; background: var(--surface-2); font-weight: 800; object-fit: cover; }
+.signin .btn.gsi { margin-top: 4px; }
+.or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin-top: 14px; }
+.or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.warnt { color: var(--warn); }
+details.card > summary { cursor: pointer; }
