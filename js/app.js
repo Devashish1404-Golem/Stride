@@ -468,10 +468,14 @@ function accountCard() {
   }
   const a = state.auth;
   return `<section class="card"><div class="account">${avatar()}<div class="grow"><b>${esc(a.name || a.email)}</b><div class="muted small">${esc(a.email)}</div>
-      <div class="muted small">${a.needsTap ? '<span class="warnt">Session paused, tap Reconnect</span>' : esc(syncLabel())}</div></div></div>
+      <div class="muted small">${a.needsTap ? '<span class="warnt">Session paused, tap Reconnect</span>' : esc(syncLabel())}</div>
+      ${state.profile ? `<div class="muted small">Plan: ${DISTANCES[state.profile.goal].label} ${fmtDate(state.profile.raceDate, { day: 'numeric', month: 'short' })} · saved ${state.planAt ? new Date(state.planAt).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'before sync'}</div>` : ''}</div></div>
     <div class="row gap">
       ${a.needsTap || !google.hasToken(state) ? `<button class="btn primary" data-act="signIn">Reconnect</button>` : `<button class="btn" data-act="syncCloud">${icon('sync')} Sync now</button>`}
       <button class="btn ghost" data-act="signOut">Sign out</button>
+    </div>
+    <div class="row gap">
+      ${state.profile && google.hasToken(state) ? '<button class="btn sm ghost" data-act="usePlanHere">Use this device’s plan everywhere</button>' : ''}
     </div>
     ${state.syncError ? `<div class="err">${esc(state.syncError)}</div>` : ''}</section>`;
 }
@@ -1012,6 +1016,10 @@ const actions = {
   },
   saveClientId: () => { google.setClientId($('#clientId').value); toast('Client ID saved'); },
   syncCloud: () => cloudSync(),
+  usePlanHere: () => {
+    if (!confirm('Make this plan the one on all your devices? Other devices switch to it on their next sync. Runs and gym logs are kept everywhere.')) return;
+    state.planAt = Date.now(); save(); cloudSync();
+  },
   openRun: (d) => openRun(d.id),
   openRecovery, openStrain, openSleep,
   editTiles: openTileEditor,
