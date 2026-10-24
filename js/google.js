@@ -37,6 +37,7 @@ export function authorize(s, { health = false, silent = false } = {}) {
   });
   if (s.auth?.email) q.set('login_hint', s.auth.email);
   if (silent) q.set('prompt', 'none');
+  else if (health) q.set('prompt', 'consent');
   else if (!s.auth?.email) q.set('prompt', 'select_account');
   location.href = `${AUTH_URL}?${q}`;
 }

@@ -18,6 +18,13 @@ async function get(state, path, params = {}) {
   let body; try { body = JSON.parse(text); } catch { body = text; }
   fb.lastRaw = { path, status: res.status, body: typeof body === 'string' ? body.slice(0, 4000) : body };
   if (res.status === 401) { state.auth.healthToken = null; throw new Error('Fitbit session expired. It will reconnect automatically.'); }
+  if (res.status === 403 && /disallowed/i.test(body?.error?.message || '') && !fb.tokenScopes) {
+    // show which scopes Google actually put in the token, to tell a stale app from a Google-side issue
+    try {
+      const info = await (await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(state.auth.healthToken)}`)).json();
+      fb.tokenScopes = (info.scope || '').split(' ').map((x) => x.replace('https://www.googleapis.com/auth/', '')).join(', ');
+    } catch { /* diagnostics only */ }
+  }
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status} ${body?.error?.message || ''}`);
   return body;
 }
@@ -118,6 +125,7 @@ export async function sync(state, onRun) {
   if (!healthOk(state)) throw new Error('Connect Fitbit first.');
   const since = addDays(today(), -60);
   const report = { runs: 0, rhr: 0, sleep: 0, metrics: {}, errors: [] };
+  fb.tokenScopes = null;
 
   try {
     const known = new Set(state.runs.map((r) => r.extId).filter(Boolean));

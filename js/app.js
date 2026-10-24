@@ -1,6 +1,7 @@
 import { $, $$, esc, today, addDays, fmtDate, fmtPace, fmtDur, parseDur, fmtKm, daysBetween, mondayOf, dow, DOW, DOW_LONG, round1, sum, uid, clamp } from './util.js';
 import { state, save, replaceState, resetState, tombstone, onChange, DEFAULT_TILES } from './store.js';
 import * as google from './google.js';
+import { APP_VERSION } from './config.js';
 import { syncNow } from './sync.js';
 import { vdotFrom, vdotFromEasyPace, predictTime, DISTANCES, ZONES } from './vdot.js';
 import { generatePlan, mergePlans, allWorkouts, weekOf, swapToEasy } from './plan.js';
@@ -559,6 +560,8 @@ function viewSettings() {
       </div>
       ${fb.lastSync ? `<div class="muted small">Data received: ${['Runs', Object.keys(fb.rhr).length && 'Resting HR', Object.keys(fb.sleep).length && 'Sleep', ...Object.entries(fb.metrics || {}).filter(([, v]) => Object.keys(v).length).map(([k]) => health.METRICS[k]?.label)].filter(Boolean).join(' · ')}</div>` : ''}
       <div class="muted small">${fb.lastSync ? `Last Fitbit sync ${new Date(fb.lastSync).toLocaleString()}` : 'Never synced'}</div>
+      ${fb.tokenScopes != null ? `<div class="muted small">Fitbit token permissions: <code>${esc(fb.tokenScopes || 'none')}</code></div>` : ''}
+      ${fb.error && /disallowed/i.test(fb.error) ? '<button class="btn sm" data-act="fbConnect">Re-grant Fitbit permission</button>' : ''}
       ${fb.error ? `<div class="err">${esc(fb.error)}</div>` : ''}
       ${fb.lastRaw ? `<details><summary class="small">Show last raw response</summary><pre>${esc(JSON.stringify(fb.lastRaw, null, 1).slice(0, 3000))}</pre></details>` : ''}
     </section>
@@ -578,7 +581,7 @@ function viewSettings() {
       <div class="row gap"><button class="btn" data-act="exportData">Export</button><label class="btn file">Import<input type="file" id="importBackup" accept=".json,application/json"></label></div>
     </section>
     <section class="card"><button class="btn block danger" data-act="reset">Reset everything</button></section>
-    <p class="muted small center">Stride gives training guidance, not medical advice. Stop and get checked if something hurts.</p>`;
+    <p class="muted small center">Stride v${APP_VERSION}. Stride gives training guidance, not medical advice. Stop and get checked if something hurts.</p>`;
 }
 
 function render() {
@@ -1193,4 +1196,13 @@ setInterval(() => {
   }
   if (strava.connected(state) && stravaStale()) stravaSync(true);
 }, 60e3);
-if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  // reload once when a new version takes over, so the Home Screen app never runs stale code
+  let reloaded = false;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded && !tracker) { reloaded = true; location.reload(); } });
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+    reg.update();
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update(); });
+  }).catch(() => {});
+}
