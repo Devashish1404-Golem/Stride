@@ -352,3 +352,8 @@ body { background: radial-gradient(120% 60% at 50% -10%, #12202e 0%, #000 60%) f
 .btn.spot-btn { background: var(--spotify); border-color: var(--spotify); color: #000; }
 a.btn { text-decoration: none; }
 .tgrid { cursor: pointer; }
+
+.love { text-align: center; color: var(--muted); font-size: 13px; padding: 28px 0 8px; letter-spacing: .02em; }
+.love span { display: inline-block; animation: beat 1.6s ease-in-out infinite; }
+@keyframes beat { 0%, 100% { transform: scale(1); } 15% { transform: scale(1.25); } 30% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .love span { animation: none; } }
